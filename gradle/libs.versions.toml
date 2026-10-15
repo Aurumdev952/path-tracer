@@ -1,0 +1,19 @@
+[versions]
+agp = "9.4.1"
+kotlin = "2.2.10"
+composeBom = "2025.12.00"
+activityCompose = "1.8.2"
+arcore = "1.56.0"
+playServicesAuth = "21.3.0"
+
+[libraries]
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+arcore = { group = "com.google.ar", name = "core", version.ref = "arcore" }
+play-services-auth = { group = "com.google.android.gms", name = "play-services-auth", version.ref = "playServicesAuth" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
