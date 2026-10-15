@@ -117,3 +117,7 @@ export JAVA_OPTS="-Djdk.lang.processReaperUseDefaultStackSize=true"
 ```
 
 **The marker isn't recognised.** Make it bigger in the camera view, cut glare and reflections, and keep the camera still for a second. A matte print works best.
+
+## License
+
+[MIT](LICENSE)
