@@ -160,6 +160,14 @@ Run the logic tests with `./gradlew testDebugUnitTest`.
 - Hide the free trail behind real objects too.
 - Recognise a room offline with no marker, using an open-source mapping library such as [RTAB-Map](https://introlab.github.io/rtabmap/).
 
+## Debug mode
+
+Long-press the **Path Tracer** title on the home screen to turn debug mode on or off.
+
+- AR screens show a small panel with live numbers: frame rate, tracking, stage, lock-on frames, measured sign width, progress, distance off the path, last drift and depth status. Tap it to fold it away.
+- Each AR session saves a log in the app's storage (the newest 40 are kept), one event per line, like `12.345 snap leg=2 stretch=0 drift_m=0.310 turn_deg=1.2`. Useful events: `photo`, `photo_seen`, `locked` (lock-on time), `found` (time to recognise a route's photo), `snap` (drift corrected by a photo), `off_route`, `say`, `sample` (once a second).
+- **Share logs** on the home screen zips them all. Over USB: `adb shell run-as rw.aurum.pathtracer ls files/logs`.
+
 ## Troubleshooting
 
 **The Gradle build hangs and never finishes.** On some Linux setups the JVM's process-reaper thread overflows its stack, so Gradle never sees child processes such as `jlink` exit. `gradle.properties` already passes `-Djdk.lang.processReaperUseDefaultStackSize=true` to the Gradle daemon. If the launcher itself still hangs, also run:

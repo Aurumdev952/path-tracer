@@ -3,6 +3,7 @@ package rw.aurum.pathtracer
 import android.Manifest
 import android.content.pm.PackageManager
 import android.opengl.GLSurfaceView
+import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -15,6 +16,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.viewinterop.AndroidView
@@ -36,6 +38,9 @@ abstract class ArActivity : ComponentActivity() {
     private var session: Session? = null
     private var installRequested = false
     protected val blocker = mutableStateOf<String?>(null)
+    /** The session log, when debug mode is on. */
+    protected var debug: DebugLog? = null
+        private set
 
     /** Asks for the sharpest camera image ARCore offers, for taking photos. */
     protected open val wantsSharpImages = false
@@ -54,6 +59,18 @@ abstract class ArActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (DebugLog.isEnabled(this)) {
+            debug = DebugLog.open(this, javaClass.simpleName.removeSuffix("Activity").lowercase()).also {
+                it.event(
+                    "start",
+                    "device" to "${Build.MANUFACTURER} ${Build.MODEL}",
+                    "android" to Build.VERSION.RELEASE,
+                    "app" to runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull(),
+                    "arcore" to runCatching { packageManager.getPackageInfo("com.google.ar.core", 0).versionName }.getOrNull(),
+                )
+                renderer.debug = it
+            }
+        }
         @Suppress("DEPRECATION")
         renderer.displayRotation = { windowManager.defaultDisplay.rotation }
         glView = GLSurfaceView(this).apply {
@@ -69,6 +86,7 @@ abstract class ArActivity : ComponentActivity() {
                     AndroidView(factory = { glView }, modifier = Modifier.fillMaxSize())
                     val message = blocker.value
                     if (message != null) BlockerScreen(message) else Overlay()
+                    debug?.let { DebugPanel(it, Modifier.align(Alignment.CenterStart)) }
                 }
             }
         }
@@ -113,12 +131,21 @@ abstract class ArActivity : ComponentActivity() {
                 )
                 this.session = session
                 renderer.attach(session)
+                debug?.event(
+                    "session",
+                    "depth" to session.config.depthMode.name.lowercase(),
+                    "planes" to session.config.planeFindingMode.name.lowercase(),
+                    "image" to session.cameraConfig.imageSize.let { "${it.width}x${it.height}" },
+                    "texture" to session.cameraConfig.textureSize.let { "${it.width}x${it.height}" },
+                )
             }
         }
     } catch (e: UnavailableException) {
+        debug?.event("error", "message" to e.javaClass.simpleName)
         blocker.value = "This device can't run ARCore (${e.javaClass.simpleName.removePrefix("Unavailable").removeSuffix("Exception")})."
         null
     } catch (e: Exception) {
+        debug?.event("error", "message" to e.message)
         blocker.value = "Couldn't start AR: ${e.message}"
         null
     }
@@ -129,9 +156,12 @@ abstract class ArActivity : ComponentActivity() {
             glView.onPause()
             session?.pause()
         }
+        debug?.event("pause")
+        debug?.flush()
     }
 
     override fun onDestroy() {
+        debug?.close()
         session?.close()
         session = null
         super.onDestroy()
