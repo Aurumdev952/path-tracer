@@ -30,6 +30,12 @@ abstract class ArRenderer : GLSurfaceView.Renderer {
         private set
     var displayRotation: () -> Int = { 0 }
 
+    /** Set when debug mode is on. */
+    @Volatile var debug: DebugLog? = null
+    private var fpsFrames = 0
+    private var fpsSince = 0L
+    private var lastTracking = ""
+
     fun attach(session: Session) {
         this.session = session
         viewportChanged = true
@@ -79,7 +85,28 @@ abstract class ArRenderer : GLSurfaceView.Renderer {
             return
         }
         background.draw(frame)
+        debug?.let { trace(it, frame.camera) }
         onFrame(session, frame)
+    }
+
+    private fun trace(debug: DebugLog, camera: Camera) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        fpsFrames++
+        if (now - fpsSince >= 1000) {
+            if (fpsSince > 0) debug.show("fps", fpsFrames * 1000 / (now - fpsSince))
+            fpsFrames = 0
+            fpsSince = now
+        }
+        val tracking = if (camera.trackingState == TrackingState.PAUSED) {
+            "paused/" + camera.trackingFailureReason.name.lowercase()
+        } else {
+            camera.trackingState.name.lowercase()
+        }
+        if (tracking != lastTracking) {
+            debug.event("tracking", "state" to tracking)
+            lastTracking = tracking
+        }
+        debug.show("tracking", tracking)
     }
 }
 
