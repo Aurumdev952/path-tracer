@@ -2,7 +2,10 @@ package rw.aurum.pathtracer
 
 import android.graphics.Bitmap
 import com.google.ar.core.Coordinates2d
+import com.google.ar.core.DepthPoint
 import com.google.ar.core.Frame
+import com.google.ar.core.Plane
+import com.google.ar.core.Pose
 import com.google.ar.core.exceptions.NotYetAvailableException
 import kotlin.math.hypot
 import kotlin.math.max
@@ -13,6 +16,37 @@ object SignPhoto {
     /** The framing box is a square this fraction of the screen width, centered on the screen. */
     const val BOX = 0.72f
     private const val MAX_SIDE = 1024
+    private const val EDGE = 0.05f
+    private const val MIN_WIDTH = 0.05f
+    private const val MAX_WIDTH = 4f
+
+    /**
+     * Measures the real width of what the framing box covers, in meters, by finding the surface
+     * at the box's left edge, right edge and center (detected walls and floors, or depth). Returns
+     * null unless all three agree on one flat surface.
+     */
+    fun measureWidth(frame: Frame, viewWidth: Int, viewHeight: Int): Float? {
+        val side = viewWidth * BOX
+        val left = (viewWidth - side) / 2
+        val y = viewHeight / 2f
+        fun surface(x: Float): Pose? = frame.hitTest(x, y).firstOrNull { hit ->
+            when (val t = hit.trackable) {
+                is Plane -> t.isPoseInPolygon(hit.hitPose)
+                is DepthPoint -> true
+                else -> false
+            }
+        }?.hitPose
+        val a = surface(left + side * EDGE) ?: return null
+        val b = surface(left + side * (1 - EDGE)) ?: return null
+        val c = surface(viewWidth / 2f) ?: return null
+        fun dist(p: Pose, q: Pose) = hypot(hypot(p.tx() - q.tx(), p.ty() - q.ty()), p.tz() - q.tz())
+        val across = dist(a, b)
+        // The center must sit near the middle of the two edges, or the box spans a corner or a gap.
+        val mid = Pose.makeTranslation((a.tx() + b.tx()) / 2, (a.ty() + b.ty()) / 2, (a.tz() + b.tz()) / 2)
+        if (dist(c, mid) > across * 0.15f) return null
+        val width = across / (1 - 2 * EDGE)
+        return width.takeIf { it in MIN_WIDTH..MAX_WIDTH }
+    }
 
     /** Returns null when no camera image is ready yet; try again on the next frame. */
     fun capture(frame: Frame, viewWidth: Int, viewHeight: Int): Bitmap? {

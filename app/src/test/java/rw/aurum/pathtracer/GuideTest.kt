@@ -179,6 +179,15 @@ class GuideTest {
         assertEquals(listOf("B1", "G"), back.floors)
     }
 
+    @Test fun speaksInstructionsAsSentences() {
+        assertEquals("Turn left in 4.5 meters", Instruction(Instruction.Kind.Turn, "Turn left", "in 4.5 m").spoken())
+        assertEquals("Turn right now", Instruction(Instruction.Kind.Turn, "Turn right", "now").spoken())
+        assertEquals(
+            "Take the elevator to floor 5, in 12 meters",
+            Instruction(Instruction.Kind.Floor, "Take the elevator", "to floor 5 · in 12 m").spoken(),
+        )
+    }
+
     @Test fun formatsDistances() {
         assertEquals("4 m", meters(4.1f))
         assertEquals("4.5 m", meters(4.4f))

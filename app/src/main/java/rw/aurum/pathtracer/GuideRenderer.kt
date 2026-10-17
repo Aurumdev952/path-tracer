@@ -20,19 +20,29 @@ class GuideRenderer {
     private val quad: FloatBuffer = allocate(4 * FLOATS_PER_VERTEX)
     private val mvp = FloatArray(16)
     private val viewModel = FloatArray(16)
+    private var depth: DepthTexture? = null
 
     fun create() {
         val vertex = """
             uniform mat4 u_Mvp;
+            uniform mat4 u_ModelView;
             attribute vec3 a_Pos;
             attribute vec2 a_Uv;
             varying vec2 v_Uv;
-            void main() { gl_Position = u_Mvp * vec4(a_Pos, 1.0); v_Uv = a_Uv; }
+            varying vec4 v_Clip;
+            varying float v_ViewZ;
+            void main() {
+                gl_Position = u_Mvp * vec4(a_Pos, 1.0);
+                v_Clip = gl_Position;
+                v_ViewZ = -(u_ModelView * vec4(a_Pos, 1.0)).z;
+                v_Uv = a_Uv;
+            }
             """
         ribbonProgram = linkProgram(
             vertex,
             """
             precision mediump float;
+            ${DepthTexture.GLSL}
             uniform float u_Time;
             uniform float u_From;
             uniform float u_To;
@@ -45,7 +55,7 @@ class GuideRenderer {
                 float chevron = smoothstep(0.0, 0.07, c) * (1.0 - smoothstep(0.24, 0.36, c));
                 float fade = smoothstep(u_From, u_From + 0.8, v_Uv.x) * (1.0 - smoothstep(u_To - 3.0, u_To, v_Uv.x));
                 float rim = smoothstep(0.75, 0.9, across) * (1.0 - smoothstep(0.92, 1.0, across));
-                float alpha = fade * (edge * (0.18 + 0.8 * chevron) + 0.5 * rim);
+                float alpha = fade * (edge * (0.18 + 0.8 * chevron) + 0.5 * rim) * visibility();
                 vec3 color = mix(vec3(0.18, 0.90, 0.78), vec3(1.0), chevron * 0.35);
                 gl_FragColor = vec4(color * alpha, alpha);
             }
@@ -55,6 +65,7 @@ class GuideRenderer {
             vertex,
             """
             precision mediump float;
+            ${DepthTexture.GLSL}
             uniform float u_Time;
             uniform float u_Alpha;
             varying vec2 v_Uv; // -1..1; +y points the way to go
@@ -65,7 +76,7 @@ class GuideRenderer {
                 float head = step(0.05, p.y) * step(p.y, 0.95) * step(abs(p.x), (0.95 - p.y) * 0.85);
                 float shape = max(shaft, head);
                 float glow = exp(-dot(v_Uv, v_Uv) * 2.0) * 0.25;
-                float alpha = clamp(shape * 0.95 + glow, 0.0, 1.0) * u_Alpha;
+                float alpha = clamp(shape * 0.95 + glow, 0.0, 1.0) * u_Alpha * visibility();
                 gl_FragColor = vec4(mix(vec3(0.18, 0.90, 0.78), vec3(1.0), shape * 0.6) * alpha, alpha);
             }
             """,
@@ -74,6 +85,7 @@ class GuideRenderer {
             vertex,
             """
             precision mediump float;
+            ${DepthTexture.GLSL}
             uniform float u_Time;
             uniform vec3 u_Color;
             varying vec2 v_Uv;
@@ -83,7 +95,7 @@ class GuideRenderer {
                 float ring = fract(u_Time * 0.7);
                 float pulse = exp(-pow((r - ring) * 12.0, 2.0)) * (1.0 - ring);
                 float outline = exp(-pow((r - 0.85) * 25.0, 2.0)) * 0.7;
-                float alpha = clamp(centre + pulse + outline, 0.0, 1.0) * (1.0 - smoothstep(0.95, 1.0, r));
+                float alpha = clamp(centre + pulse + outline, 0.0, 1.0) * (1.0 - smoothstep(0.95, 1.0, r)) * visibility();
                 gl_FragColor = vec4(u_Color * alpha, alpha);
             }
             """,
@@ -98,11 +110,13 @@ class GuideRenderer {
     /**
      * [slice] is the stretch of route to draw with each point's distance along it; it fades out
      * toward [fadeTo]. [turn] is the next turn in view, [marker] the end of the stretch if in view.
+     * With [depth], real walls and furniture hide what is behind them.
      */
     fun draw(
         slice: List<Pair<TrailPoint, Float>>, fadeTo: Float, turn: Maneuver.Turn?, marker: Pair<TrailPoint, Marker>?,
-        model: FloatArray, view: FloatArray, projection: FloatArray, timeSec: Float,
+        model: FloatArray, view: FloatArray, projection: FloatArray, timeSec: Float, depth: DepthTexture?,
     ) {
+        this.depth = depth?.takeIf { it.ready }
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
@@ -131,6 +145,9 @@ class GuideRenderer {
             drawStrip(arrowProgram, quad, 4, timeSec)
         }
 
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glDepthMask(true)
         GLES20.glEnable(GLES20.GL_DEPTH_TEST)
         GLES20.glDisable(GLES20.GL_BLEND)
@@ -142,7 +159,17 @@ class GuideRenderer {
 
     private fun drawStrip(program: Int, data: FloatBuffer, vertexCount: Int, time: Float) {
         GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "u_Mvp"), 1, false, mvp, 0)
+        uniform(program, "u_ModelView") { GLES20.glUniformMatrix4fv(it, 1, false, viewModel, 0) }
         uniform(program, "u_Time") { GLES20.glUniform1f(it, time) }
+        val depth = depth
+        uniform(program, "u_UseDepth") { GLES20.glUniform1f(it, if (depth != null) 1f else 0f) }
+        if (depth != null) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, depth.textureId)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            uniform(program, "u_Depth") { GLES20.glUniform1i(it, 1) }
+            uniform(program, "u_DepthUv") { GLES20.glUniformMatrix3fv(it, 1, false, depth.uvTransform, 0) }
+        }
         val aPos = GLES20.glGetAttribLocation(program, "a_Pos")
         val aUv = GLES20.glGetAttribLocation(program, "a_Uv")
         data.position(0)
