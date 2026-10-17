@@ -51,7 +51,7 @@ class Mast3rMatcher:
         resized = Image.fromarray(image).resize((rw, rh), Image.LANCZOS)
         cw, ch = rw // 16 * 16, rh // 16 * 16
         ox, oy = (rw - cw) // 2, (rh - ch) // 2
-        crop = np.asarray(resized)[oy : oy + ch, ox : ox + cw]
+        crop = np.array(resized)[oy : oy + ch, ox : ox + cw]
         tensor = torch.from_numpy(crop).permute(2, 0, 1).float().div(127.5).sub(1).unsqueeze(0)
         view = {"img": tensor, "true_shape": np.int32([[ch, cw]]), "idx": index, "instance": str(index)}
         return view, (scale, ox, oy)

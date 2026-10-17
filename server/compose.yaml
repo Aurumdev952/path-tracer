@@ -1,9 +1,9 @@
 # Both localization servers side by side on one GPU.
 #   docker compose up -d --build        LightGlue on :8001, MASt3R on :8002
-# To reuse what this machine already downloaded, set these (for example in a .env file):
-#   UV_HOST_CACHE=~/.cache/uv               Python wheels, at build time
-#   HF_HOST_CACHE=~/.cache/huggingface      MASt3R weights
-#   TORCH_HOST_CACHE=~/.cache/torch         ALIKED and LightGlue weights
+# To reuse what this machine already downloaded:
+#   UV_SEED_CACHE=~/.cache/uv docker compose build   once: copies uv's wheels into Docker's cache
+#   HF_HOST_CACHE=~/.cache/huggingface               (in .env) MASt3R weights
+#   TORCH_HOST_CACHE=~/.cache/torch                  (in .env) ALIKED and LightGlue weights
 x-gpu: &gpu
   deploy:
     resources:
@@ -21,7 +21,7 @@ services:
       context: .
       args: { MATCHER: lightglue }
       additional_contexts:
-        uvcache: ${UV_HOST_CACHE:-./docker/no-cache}
+        uvseed: ${UV_SEED_CACHE:-./docker/no-cache}
     ports: ["8001:8000"]
     volumes:
       - ${HF_HOST_CACHE:-hf}:/models/hf
@@ -35,7 +35,7 @@ services:
       context: .
       args: { MATCHER: mast3r }
       additional_contexts:
-        uvcache: ${UV_HOST_CACHE:-./docker/no-cache}
+        uvseed: ${UV_SEED_CACHE:-./docker/no-cache}
     ports: ["8002:8000"]
     volumes:
       - ${HF_HOST_CACHE:-hf}:/models/hf
