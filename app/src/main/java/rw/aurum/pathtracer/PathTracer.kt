@@ -1,7 +1,5 @@
 package rw.aurum.pathtracer
 
-import android.opengl.GLES20
-import android.opengl.GLSurfaceView
 import android.os.SystemClock
 import com.google.ar.core.Anchor
 import com.google.ar.core.Anchor.CloudAnchorState
@@ -13,17 +11,9 @@ import com.google.ar.core.Plane
 import com.google.ar.core.Pose
 import com.google.ar.core.ResolveCloudAnchorFuture
 import com.google.ar.core.Session
-import com.google.ar.core.TrackingFailureReason
 import com.google.ar.core.TrackingState
-import com.google.ar.core.exceptions.CameraNotAvailableException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import java.util.concurrent.ConcurrentLinkedQueue
-import javax.microedition.khronos.egl.EGLConfig
-import javax.microedition.khronos.opengles.GL10
-import kotlin.math.atan2
-import kotlin.math.cos
-import kotlin.math.sin
 
 /** Where the app is in relating the trail to the physical room. */
 sealed interface Room {
@@ -50,10 +40,10 @@ data class UiState(
 )
 
 /**
- * Owns the ARCore frame loop. All AR and trail state lives on the GL thread; the UI and ARCore
+ * The free-walk trail mode. All AR and trail state lives on the GL thread; the UI and ARCore
  * callbacks talk to it only through [post], and it reports back through [state].
  */
-class PathTracer(private val store: TrailStore) : GLSurfaceView.Renderer {
+class PathTracer(private val store: TrailStore) : ArRenderer() {
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state
@@ -62,16 +52,7 @@ class PathTracer(private val store: TrailStore) : GLSurfaceView.Renderer {
     @Volatile var trail: Trail = Trail(emptyList(), Memory.Marker)
         private set
 
-    @Volatile private var session: Session? = null
-    private val events = ConcurrentLinkedQueue<() -> Unit>()
-
-    private val background = BackgroundRenderer()
     private val trailRenderer = TrailRenderer()
-    private var textureBoundTo: Session? = null
-    private var viewportChanged = false
-    private var width = 1
-    private var height = 1
-    var displayRotation: () -> Int = { 0 }
 
     private var started = false
     private var room: Room = Room.FindingStart
@@ -86,15 +67,6 @@ class PathTracer(private val store: TrailStore) : GLSurfaceView.Renderer {
     private val projection = FloatArray(16)
     private val model = FloatArray(16)
     private val startTime = SystemClock.elapsedRealtime()
-
-    fun attach(session: Session) {
-        this.session = session
-        viewportChanged = true
-    }
-
-    private fun post(event: () -> Unit) {
-        events.add(event)
-    }
 
     fun toggleRecording() = post { recording = !recording }
 
@@ -118,40 +90,10 @@ class PathTracer(private val store: TrailStore) : GLSurfaceView.Renderer {
         if (trail.points.isNotEmpty()) store.save(trail)
     }
 
-    override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        GLES20.glClearColor(0f, 0f, 0f, 1f)
-        background.create()
-        trailRenderer.create()
-        textureBoundTo = null
-    }
+    override fun onCreateGl() = trailRenderer.create()
 
-    override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
-        GLES20.glViewport(0, 0, width, height)
-        this.width = width
-        this.height = height
-        viewportChanged = true
-    }
-
-    override fun onDrawFrame(gl: GL10?) {
-        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
-        val session = session ?: return
-        if (textureBoundTo !== session) {
-            session.setCameraTextureName(background.textureId)
-            textureBoundTo = session
-        }
-        if (viewportChanged) {
-            session.setDisplayGeometry(displayRotation(), width, height)
-            viewportChanged = false
-        }
-        while (true) (events.poll() ?: break)()
+    override fun onFrame(session: Session, frame: Frame) {
         if (!started) start(session)
-
-        val frame = try {
-            session.update()
-        } catch (e: CameraNotAvailableException) {
-            return
-        }
-        background.draw(frame)
 
         val camera = frame.camera
         var hint = trackingHint(camera)
@@ -208,16 +150,6 @@ class PathTracer(private val store: TrailStore) : GLSurfaceView.Renderer {
         anchor = session.createAnchor(Pose.makeTranslation(floorHit.hitPose.translation))
         anchorPlacedAt = SystemClock.elapsedRealtime()
         room = Room.Anchoring
-    }
-
-    /**
-     * Keeps only the marker's heading, so the anchor frame stays upright whether the marker lies
-     * on the floor or hangs on a wall.
-     */
-    private fun levelled(pose: Pose): Pose {
-        val x = pose.xAxis
-        val yaw = atan2(-x[2], x[0])
-        return Pose(pose.translation, floatArrayOf(0f, sin(yaw / 2), 0f, cos(yaw / 2)))
     }
 
     /** World height of the floor: the lowest detected floor plane, or a typical eye height below the camera. */
@@ -308,17 +240,6 @@ class PathTracer(private val store: TrailStore) : GLSurfaceView.Renderer {
             recording = recording,
         )
         if (next != _state.value) _state.value = next
-    }
-
-    private fun trackingHint(camera: Camera): String? {
-        if (camera.trackingState == TrackingState.TRACKING) return null
-        return when (camera.trackingFailureReason) {
-            TrackingFailureReason.INSUFFICIENT_LIGHT -> "Too dark. Turn on a light"
-            TrackingFailureReason.EXCESSIVE_MOTION -> "Moving too fast. Slow down"
-            TrackingFailureReason.INSUFFICIENT_FEATURES -> "Point at something with more detail"
-            TrackingFailureReason.CAMERA_UNAVAILABLE -> "Camera is in use by another app"
-            else -> "Move your phone slowly to start tracking"
-        }
     }
 
     private fun describe(state: CloudAnchorState): String = when (state) {

@@ -5,6 +5,8 @@ composeBom = "2025.12.00"
 activityCompose = "1.8.2"
 arcore = "1.56.0"
 playServicesAuth = "21.3.0"
+junit = "4.13.2"
+orgJson = "20240303"
 
 [libraries]
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
@@ -13,6 +15,8 @@ androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
 androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
 arcore = { group = "com.google.ar", name = "core", version.ref = "arcore" }
 play-services-auth = { group = "com.google.android.gms", name = "play-services-auth", version.ref = "playServicesAuth" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+org-json = { group = "org.json", name = "json", version.ref = "orgJson" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
