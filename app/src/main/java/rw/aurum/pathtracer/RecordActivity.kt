@@ -52,6 +52,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.google.ar.core.Config
+import com.google.ar.core.Session
 import java.io.File
 
 /** Records a route: photo of a sign at the entrance, then walk, with photos after elevators. */
@@ -61,6 +63,13 @@ class RecordActivity : ArActivity() {
     private val recorder by lazy { RouteRecorder(store) }
     override val renderer: ArRenderer get() = recorder
     override val wantsSharpImages = true
+
+    override fun configure(session: Session, config: Config) {
+        // Walls as well as floors, and depth when the phone has it: both let the recorder measure
+        // a sign the moment it is photographed, so ARCore can lock on to it right away.
+        config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
+        if (session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) config.depthMode = Config.DepthMode.AUTOMATIC
+    }
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         if (savedInstanceState == null) store.clearDraft()

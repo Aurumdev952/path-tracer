@@ -33,6 +33,9 @@ data class FollowUi(
     val buzz: Int = 0,
     /** Near the end of a stretch that leads to an elevator, offer to move on by hand. */
     val canSkip: Boolean = false,
+    /** What to say out loud; [speechId] goes up by one for each new thing to say. */
+    val speech: String = "",
+    val speechId: Int = 0,
 )
 
 /**
@@ -46,7 +49,11 @@ class RouteFollower(route: Route) : ArRenderer() {
 
     private val navigator = Navigator(route)
     private val guideRenderer = GuideRenderer()
+    private val depth = DepthTexture()
     private val floorTracker = FloorTracker()
+
+    /** Set by the activity when the phone supports ARCore depth and it is switched on. */
+    @Volatile var useDepth = false
 
     private var stage: FollowStage = FollowStage.Searching(0)
     private var anchor: Anchor? = null
@@ -56,6 +63,14 @@ class RouteFollower(route: Route) : ArRenderer() {
     private var buzz = 0
     private var buzzedFor = -1
     private var buzzedStretch = -1
+    private var speech = ""
+    private var speechId = 0
+    /** Stretch, maneuver and kind of the instruction last spoken, so each is said once. */
+    private var spokenFor: Triple<Int, Int, Instruction.Kind>? = null
+
+    init {
+        say("Go to the entrance and point your camera at the sign in the photo")
+    }
 
     private val view = FloatArray(16)
     private val projection = FloatArray(16)
@@ -66,12 +81,14 @@ class RouteFollower(route: Route) : ArRenderer() {
     fun skip() = post {
         if (stage == FollowStage.Guiding && !navigator.isLastStretch) {
             navigator.skip()
-            stage = FollowStage.Searching(navigator.stretch)
-            dropAnchor()
+            searchNext()
         }
     }
 
-    override fun onCreateGl() = guideRenderer.create()
+    override fun onCreateGl() {
+        guideRenderer.create()
+        depth.create()
+    }
 
     override fun onFrame(session: Session, frame: Frame) {
         frameCount++
@@ -79,6 +96,7 @@ class RouteFollower(route: Route) : ArRenderer() {
         var hint = trackingHint(camera)
         var guidance: Guidance? = null
         var arrow: Float? = null
+        if (useDepth) depth.update(frame)
 
         if (camera.trackingState == TrackingState.TRACKING && stage != FollowStage.Arrived) {
             snapToPhotos(session, frame)
@@ -115,6 +133,7 @@ class RouteFollower(route: Route) : ArRenderer() {
             val moving = stretchIndex != navigator.stretch || stage != FollowStage.Guiding
             if (!moving && !movedEnough(world)) continue
             navigator.lockOn(leg)
+            if (moving) spokenFor = null
             stage = FollowStage.Guiding
             dropAnchor()
             anchor = session.createAnchor(world)
@@ -143,13 +162,20 @@ class RouteFollower(route: Route) : ArRenderer() {
         val local = anchor.pose.inverse().transformPoint(floatArrayOf(cam.tx(), floorTracker.floorY(session, camera), cam.tz()))
         val g = navigator.update(TrailPoint(local[0], local[1], local[2]))
 
-        // Buzz once when each turn, floor change or end comes within reach.
+        // Buzz and speak once when each turn, floor change or end comes within reach. Also speak
+        // when a new instruction comes up, e.g. "Go straight" after a turn.
+        val key = Triple(navigator.stretch, g.maneuverKey, g.instruction.kind)
         if (g.maneuverDistance < BUZZ_DISTANCE && !g.offRoute &&
             (g.maneuverKey != buzzedFor || navigator.stretch != buzzedStretch)
         ) {
             buzz++
             buzzedFor = g.maneuverKey
             buzzedStretch = navigator.stretch
+            say(g.instruction.spoken())
+            spokenFor = key
+        } else if (key != spokenFor) {
+            say((if (spokenFor == null) "Route found. " else "") + g.instruction.spoken())
+            spokenFor = key
         }
 
         val stretch = navigator.stretches[navigator.stretch]
@@ -167,18 +193,37 @@ class RouteFollower(route: Route) : ArRenderer() {
         camera.getProjectionMatrix(projection, 0, 0.05f, 100f)
         anchor.pose.toMatrix(model, 0)
         val seconds = (SystemClock.elapsedRealtime() - startTime) / 1000f
-        guideRenderer.draw(path.slice(from, to), if (endsHere) to + 10f else to, turn, marker, model, view, projection, seconds)
+        guideRenderer.draw(
+            path.slice(from, to), if (endsHere) to + 10f else to, turn, marker,
+            model, view, projection, seconds, depth.takeIf { useDepth },
+        )
 
         if (navigator.atStretchEnd(g)) {
             if (navigator.isLastStretch) {
                 stage = FollowStage.Arrived
+                say("You've arrived")
             } else {
                 navigator.skip()
-                stage = FollowStage.Searching(navigator.stretch)
-                dropAnchor()
+                searchNext()
             }
         }
         return g
+    }
+
+    /** After reaching an elevator: wait for the photo that starts the next stretch. */
+    private fun searchNext() {
+        stage = FollowStage.Searching(navigator.stretch)
+        dropAnchor()
+        val floor = (navigator.stretches[navigator.stretch].entry as? LegEntry.Elevator)?.floor.orEmpty()
+        say(
+            "Take the elevator" + (if (floor.isNotBlank()) " to floor $floor" else "") +
+                ". When you step out, point your camera at the sign in the photo",
+        )
+    }
+
+    private fun say(text: String) {
+        speech = text
+        speechId++
     }
 
     /** The turn needed to face the path, or null when the path is roughly ahead. */
@@ -215,6 +260,8 @@ class RouteFollower(route: Route) : ArRenderer() {
             buzz = buzz,
             canSkip = stage == FollowStage.Guiding && !navigator.isLastStretch &&
                 g != null && navigator.stretches[navigator.stretch].path.length - g.progress < SKIP_WITHIN,
+            speech = speech,
+            speechId = speechId,
         )
         if (next != previous) _state.value = next
     }

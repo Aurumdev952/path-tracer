@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.speech.tts.TextToSpeech
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -37,6 +38,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
@@ -53,6 +55,7 @@ import com.google.ar.core.Config
 import com.google.ar.core.Session
 import com.google.ar.core.exceptions.ImageInsufficientQualityException
 import java.io.File
+import java.util.Locale
 import kotlin.math.abs
 
 /** Guides a follower along a saved route, starting from the photo of its entrance. */
@@ -63,15 +66,51 @@ class FollowActivity : ArActivity() {
     private val stretches by lazy { route.stretches() }
     private val follower by lazy { RouteFollower(route) }
     override val renderer: ArRenderer get() = follower
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+    private val voice = mutableStateOf(true)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val loaded = intent.getStringExtra(EXTRA_ROUTE)?.let(store::load)
         route = loaded ?: Route("missing", "", 0L, emptyList())
         super.onCreate(savedInstanceState)
-        if (loaded == null) finish()
+        if (loaded == null) {
+            finish()
+            return
+        }
+        voice.value = getPreferences(MODE_PRIVATE).getBoolean(PREF_VOICE, true)
+        tts = TextToSpeech(this) { status ->
+            if (status != TextToSpeech.SUCCESS) return@TextToSpeech
+            val engine = tts ?: return@TextToSpeech
+            val ok = engine.setLanguage(Locale.getDefault())
+            if (ok == TextToSpeech.LANG_MISSING_DATA || ok == TextToSpeech.LANG_NOT_SUPPORTED) engine.setLanguage(Locale.US)
+            ttsReady = true
+            speak(follower.state.value.speech)
+        }
+    }
+
+    override fun onDestroy() {
+        tts?.shutdown()
+        tts = null
+        super.onDestroy()
+    }
+
+    private fun speak(text: String) {
+        if (!voice.value || !ttsReady || text.isEmpty()) return
+        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "guide")
+    }
+
+    private fun toggleVoice() {
+        voice.value = !voice.value
+        getPreferences(MODE_PRIVATE).edit().putBoolean(PREF_VOICE, voice.value).apply()
+        if (!voice.value) tts?.stop()
     }
 
     override fun configure(session: Session, config: Config) {
+        if (session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
+            config.depthMode = Config.DepthMode.AUTOMATIC
+            follower.useDepth = true
+        }
         config.augmentedImageDatabase = AugmentedImageDatabase(session).apply {
             route.legs.forEachIndexed { i, leg ->
                 val bitmap = store.loadPhoto(route, leg) ?: return@forEachIndexed
@@ -88,9 +127,12 @@ class FollowActivity : ArActivity() {
     override fun Overlay() {
         val ui by follower.state.collectAsState()
         LaunchedEffect(ui.buzz) { if (ui.buzz > 0) buzz() }
+        LaunchedEffect(ui.speechId) { speak(ui.speech) }
         FollowOverlay(
             route = route,
             ui = ui,
+            voice = voice.value,
+            onVoice = ::toggleVoice,
             stretchFor = { stretches[it] },
             photoFor = { stretch -> store.photo(route, route.legs[stretches[stretch].firstLeg]) },
             onSkip = follower::skip,
@@ -110,6 +152,7 @@ class FollowActivity : ArActivity() {
 
     companion object {
         private const val EXTRA_ROUTE = "route"
+        private const val PREF_VOICE = "voice"
 
         fun start(context: Context, route: Route) {
             context.startActivity(Intent(context, FollowActivity::class.java).putExtra(EXTRA_ROUTE, route.id))
@@ -121,6 +164,8 @@ class FollowActivity : ArActivity() {
 private fun FollowOverlay(
     route: Route,
     ui: FollowUi,
+    voice: Boolean,
+    onVoice: () -> Unit,
     stretchFor: (Int) -> Stretch,
     photoFor: (Int) -> File,
     onSkip: () -> Unit,
@@ -148,6 +193,7 @@ private fun FollowOverlay(
                 ui.hint?.let { Hint(it, Modifier.padding(bottom = 12.dp)) }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (ui.canSkip) OutlinedButton(onClick = onSkip) { Text("I'm at the elevator") }
+                    OutlinedButton(onClick = onVoice) { Text(if (voice) "Voice on" else "Voice off") }
                     OutlinedButton(onClick = onStop) { Text("Stop") }
                 }
             }

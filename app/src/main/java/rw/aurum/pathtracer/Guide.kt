@@ -236,6 +236,12 @@ fun Maneuver.instruction(distance: Float, next: Stretch?): Instruction {
     }
 }
 
+/** The instruction as a sentence to read out, e.g. "Turn left in 4 meters". */
+fun Instruction.spoken(): String {
+    val words = detail.replace(" · ", ", ").replace(Regex("""(\d+(\.\d+)?) m\b"""), "$1 meters")
+    return if (words.isEmpty()) title else "$title $words"
+}
+
 fun turnName(angle: Float): String {
     val deg = abs(Math.toDegrees(angle.toDouble()))
     val side = if (angle > 0) "left" else "right"

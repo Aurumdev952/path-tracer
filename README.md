@@ -22,6 +22,9 @@ It also has a free-trail mode that draws a glowing trail on the floor behind you
 - **Share as a file.** A route is one small `.pathroute` file. Send it on WhatsApp, email or anything else. It opens in Path Tracer.
 - **Follow in AR.** Point the camera at the entrance photo and the route appears. Only the next few meters show, as arrows flowing the way to walk. Turns get a big arrow on the floor and a card like "Turn left in 4 m". The phone buzzes before each turn.
 - **Never lost.** If the path is off screen, a big arrow tells you to turn left, right or around. Walk off the route and it points you back.
+- **Hidden behind walls.** On phones with ARCore depth, real walls and furniture hide the path behind them.
+- **Spoken directions.** "Turn left in 4 meters", "Take the elevator to floor 5". Tap **Voice on/off** to mute.
+- **Quick lock-on.** When you take the photo, the app measures the sign's real size from detected walls or depth, so ARCore can lock on almost at once.
 - **Works offline.** Photos are recognised on the phone with ARCore Augmented Images. No account, no server.
 
 ### Free trail
@@ -147,15 +150,14 @@ Run the logic tests with `./gradlew testDebugUnitTest`.
 
 ## Limitations
 
-- The path is drawn on top of everything, so walls and furniture don't hide it yet. Follow mode limits this by only showing the next 7 m.
+- On phones without ARCore depth, the path is drawn on top of everything. Follow mode limits this by only showing the next 7 m. The free trail is always drawn on top.
 - Free trail keeps one trail at a time and assumes one floor level.
 - Accuracy depends on ARCore tracking. Fast motion, low light and blank walls cause drift. Use checkpoints on long routes.
 - Photos must be of flat things. A sign that looks the same on every floor can be confused; pick ones that differ (like the floor number).
 
 ## Ideas for next steps
 
-- Hide the path behind real objects with the ARCore Depth API.
-- Spoken directions.
+- Hide the free trail behind real objects too.
 - Recognise a room offline with no marker, using an open-source mapping library such as [RTAB-Map](https://introlab.github.io/rtabmap/).
 
 ## Troubleshooting

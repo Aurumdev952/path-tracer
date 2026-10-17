@@ -66,6 +66,8 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     private var captureRequested = false
     private var pendingImage: String? = null
     private var pendingPhoto: String? = null
+    /** The pending photo's size was measured, so ARCore needs no extra looks to place it. */
+    private var pendingMeasured = false
     private var attempts = 0
     private var lockFrames = 0
     private var lockStartedAt = 0L
@@ -169,8 +171,9 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         val db = database ?: AugmentedImageDatabase(session).also { database = it }
         val index = legs.size + if (current != null) 1 else 0
         val imageName = "leg${index}_${attempts++}"
+        val measured = SignPhoto.measureWidth(frame, width, height)
         try {
-            db.addImage(imageName, bitmap)
+            if (measured != null) db.addImage(imageName, bitmap, measured) else db.addImage(imageName, bitmap)
         } catch (e: ImageInsufficientQualityException) {
             notice("Not enough detail in that photo. Try a sign with text or a picture")
             return
@@ -180,6 +183,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         saveJpeg(bitmap, File(store.draft, photo))
         pendingImage = imageName
         pendingPhoto = photo
+        pendingMeasured = measured != null
         lockFrames = 0
         lockStartedAt = SystemClock.elapsedRealtime()
         hint = null
@@ -196,7 +200,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             if (!s.slow && SystemClock.elapsedRealtime() - lockStartedAt > SLOW_LOCK_MS) stage = s.copy(slow = true)
             return null
         }
-        if (++lockFrames < LOCK_FRAMES) return null
+        if (++lockFrames < (if (pendingMeasured) LOCK_FRAMES_MEASURED else LOCK_FRAMES)) return null
 
         val pose = levelled(image.centerPose)
         val anchor = session.createAnchor(pose)
@@ -248,6 +252,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     private companion object {
         const val STEP_METERS = 0.12f
         const val LOCK_FRAMES = 20
+        const val LOCK_FRAMES_MEASURED = 6
         const val SLOW_LOCK_MS = 8000L
         const val MIN_ROUTE_METERS = 1f
         const val NOTICE_MS = 5000L
