@@ -257,6 +257,8 @@ fun meters(d: Float): String = if (d < 10f) "${(d * 2).roundToInt() / 2f} m".rep
 /** How the follower is doing on the current stretch. */
 data class Guidance(
     val progress: Float,
+    /** Meters from the follower to the nearest point of the path. */
+    val offset: Float,
     val offRoute: Boolean,
     val instruction: Instruction,
     /** Where the on-screen arrow should point, in the stretch frame. */
@@ -325,6 +327,7 @@ class Navigator(val route: Route) {
             ?: (current.entry as? LegEntry.Elevator)?.floor.orEmpty()
         return Guidance(
             progress = progress,
+            offset = fix.offset,
             offRoute = offRoute,
             instruction = instruction,
             target = if (offRoute) fix.nearest else path.pointAt(progress + ARROW_LEAD),
