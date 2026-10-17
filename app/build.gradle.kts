@@ -33,4 +33,6 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.arcore)
     implementation(libs.play.services.auth)
+    testImplementation(libs.junit)
+    testImplementation(libs.org.json)
 }
