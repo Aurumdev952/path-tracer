@@ -1,0 +1,55 @@
+[project]
+name = "path-tracer-vps"
+version = "0.1.0"
+description = "Self-hosted entrance localization for Path Tracer: where is this phone camera, relative to a recorded view?"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    "numpy>=1.26,<3",
+    "opencv-python-headless>=4.10",
+    "pillow>=10",
+    "torch>=2.7",
+    "torchvision>=0.22",
+]
+
+[project.optional-dependencies]
+# ALIKED keypoints + LightGlue matching (Apache-2.0).
+lightglue = ["lightglue", "kornia>=0.7"]
+# MASt3R dense matching (CC BY-NC-SA 4.0: non-commercial). Its code is fetched by scripts/fetch_mast3r.sh.
+mast3r = [
+    "roma>=1.5",
+    "einops>=0.8",
+    "huggingface-hub[torch]>=0.22",
+    "safetensors>=0.4",
+    "scipy>=1.13",
+    "trimesh>=4",
+    "matplotlib>=3.8",
+    "tqdm>=4.66",
+    "scikit-learn>=1.5",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["vps"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]
+lightglue = { git = "https://github.com/cvg/LightGlue", rev = "eb42fee2d71449efb0aa5c10549752b5d75384d8" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

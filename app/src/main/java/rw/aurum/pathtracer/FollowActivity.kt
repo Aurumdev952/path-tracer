@@ -64,7 +64,8 @@ class FollowActivity : ArActivity() {
     private val store by lazy { RouteStore(File(filesDir, "routes")) }
     private lateinit var route: Route
     private val stretches by lazy { route.stretches() }
-    private val follower by lazy { RouteFollower(route) }
+    private val vps by lazy { VpsSettings.load(this) }
+    private val follower by lazy { RouteFollower(route, store, vps) }
     override val renderer: ArRenderer get() = follower
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -78,6 +79,7 @@ class FollowActivity : ArActivity() {
             finish()
             return
         }
+        debug?.event("vps_settings", "method" to vps.method.name, "lightglue" to vps.lightGlueUrl, "mast3r" to vps.mast3rUrl)
         debug?.event(
             "route", "id" to route.id, "name" to route.name, "legs" to route.legs.size,
             "stretches" to stretches.size, "meters" to route.lengthMeters,
@@ -95,6 +97,7 @@ class FollowActivity : ArActivity() {
     }
 
     override fun onDestroy() {
+        if (::route.isInitialized && route.legs.isNotEmpty()) follower.release()
         tts?.shutdown()
         tts = null
         super.onDestroy()
@@ -120,6 +123,8 @@ class FollowActivity : ArActivity() {
         }
         config.augmentedImageDatabase = AugmentedImageDatabase(session).apply {
             route.legs.forEachIndexed { i, leg ->
+                // Scene legs have no sign to track; only the server can find them.
+                if (!leg.sign) return@forEachIndexed
                 val bitmap = store.loadPhoto(route, leg) ?: return@forEachIndexed
                 try {
                     if (leg.photoWidth > 0f) addImage("leg$i", bitmap, leg.photoWidth) else addImage("leg$i", bitmap)
@@ -138,6 +143,7 @@ class FollowActivity : ArActivity() {
         FollowOverlay(
             route = route,
             ui = ui,
+            serverOn = vps.enabled,
             voice = voice.value,
             onVoice = ::toggleVoice,
             stretchFor = { stretches[it] },
@@ -171,6 +177,7 @@ class FollowActivity : ArActivity() {
 private fun FollowOverlay(
     route: Route,
     ui: FollowUi,
+    serverOn: Boolean,
     voice: Boolean,
     onVoice: () -> Unit,
     stretchFor: (Int) -> Stretch,
@@ -180,7 +187,14 @@ private fun FollowOverlay(
 ) {
     Box(Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp)) {
         when (val stage = ui.stage) {
-            is FollowStage.Searching -> Searching(route, stage.stretch, stretchFor(stage.stretch).entry, photoFor(stage.stretch), Modifier.align(Alignment.Center))
+            is FollowStage.Searching -> {
+                val stretch = stretchFor(stage.stretch)
+                Searching(
+                    route, stage.stretch, stretch.entry, photoFor(stage.stretch),
+                    sign = route.legs[stretch.firstLeg].sign, serverOn = serverOn,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            }
             FollowStage.Guiding -> {
                 ui.instruction?.let { InstructionCard(it, ui, Modifier.align(Alignment.TopCenter)) }
                 AnimatedVisibility(
@@ -209,7 +223,9 @@ private fun FollowOverlay(
 }
 
 @Composable
-private fun Searching(route: Route, stretch: Int, entry: LegEntry, photo: File, modifier: Modifier) {
+private fun Searching(
+    route: Route, stretch: Int, entry: LegEntry, photo: File, sign: Boolean, serverOn: Boolean, modifier: Modifier,
+) {
     Column(
         modifier.fillMaxWidth().background(Glass, RoundedCornerShape(24.dp)).padding(20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -225,7 +241,12 @@ private fun Searching(route: Route, stretch: Int, entry: LegEntry, photo: File, 
         )
         PhotoThumb(photo, 220)
         Text(
-            if (entry is LegEntry.Elevator) "When you step out, point your camera at this sign" else "Find this sign and point your camera at it",
+            when {
+                !sign && !serverOn -> "This spot has no sign. Turn on a localization server in debug mode to find it"
+                !sign -> "Point your camera at this spot, like in the photo"
+                entry is LegEntry.Elevator -> "When you step out, point your camera at this sign"
+                else -> "Find this sign and point your camera at it"
+            },
             color = Color.White.copy(alpha = 0.8f), textAlign = TextAlign.Center,
         )
     }

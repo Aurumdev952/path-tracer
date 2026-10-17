@@ -29,6 +29,9 @@ class RouteStore(private val root: File) {
 
     fun photo(route: Route, leg: Leg): File = File(dir(route.id), leg.photo)
 
+    /** A file of [route], such as a camera view's image or depth. */
+    fun file(route: Route, name: String): File = File(dir(route.id), name)
+
     fun loadPhoto(route: Route, leg: Leg): Bitmap? = BitmapFactory.decodeFile(photo(route, leg).path)
 
     fun clearDraft() {
@@ -56,7 +59,7 @@ class RouteStore(private val root: File) {
             zip.putNextEntry(ZipEntry(ROUTE_FILE))
             zip.write(route.toJson().toString().toByteArray())
             zip.closeEntry()
-            route.legs.map { it.photo }.distinct().forEach { name ->
+            route.files.forEach { name ->
                 zip.putNextEntry(ZipEntry(name))
                 File(dir(route.id), name).inputStream().use { it.copyTo(zip) }
                 zip.closeEntry()
@@ -95,8 +98,8 @@ class RouteStore(private val root: File) {
             val route = Route.fromJson(JSONObject(json.readText()))
             check(SAFE_ID.matches(route.id)) { "This route file is damaged" }
             check(route.legs.isNotEmpty()) { "This route is empty" }
-            route.legs.forEach {
-                check(SAFE_NAME.matches(it.photo) && File(incoming, it.photo).exists()) { "This route is missing a photo" }
+            route.files.forEach {
+                check(SAFE_NAME.matches(it) && File(incoming, it).exists()) { "This route is missing a photo" }
             }
             val target = dir(route.id)
             target.deleteRecursively()
@@ -121,7 +124,7 @@ class RouteStore(private val root: File) {
         private const val ROUTE_FILE = "route.json"
         private const val DRAFT = ".draft"
         private const val MAX_IMPORT_BYTES = 50L * 1024 * 1024
-        private val SAFE_NAME = Regex("[A-Za-z0-9_-]+\\.(json|jpg)")
+        private val SAFE_NAME = Regex("[A-Za-z0-9_-]+\\.(json|jpg|depth)")
         private val SAFE_ID = Regex("[A-Za-z0-9-]{1,64}")
     }
 }

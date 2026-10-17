@@ -55,6 +55,25 @@ class RouteStoreTest {
         assertNotNull(friend.load(r.id))
     }
 
+    @Test fun sharesCameraViewsWithTheRoute() {
+        val mine = RouteStore(tmp.newFolder("mine2"))
+        val view = CameraView(
+            "leg0_v0.jpg", "leg0_v0.depth", 160, 90, 900f, 900f, 640f, 360f,
+            CameraPose(0.1f, 1.4f, 0.5f, 0f, 0f, 0f, 1f),
+        )
+        val r = route().let { it.copy(legs = listOf(it.legs[0].copy(sign = false, views = listOf(view)), it.legs[1])) }
+        recorded(mine, r)
+        listOf("leg0_v0.jpg", "leg0_v0.depth").forEach { File(tmp.root, "mine2/${r.id}/$it").writeBytes(byteArrayOf(7)) }
+        val file = File(tmp.root, "share2/r.pathroute")
+        mine.export(r, file)
+
+        val friend = RouteStore(tmp.newFolder("friend2"))
+        val got = file.inputStream().use(friend::import)
+        assertEquals(listOf(view), got.legs[0].views)
+        assertFalse(got.legs[0].sign)
+        assertTrue(friend.file(got, "leg0_v0.depth").exists())
+    }
+
     @Test fun rejectsFilesThatAreNotRoutes() {
         val store = RouteStore(tmp.newFolder("routes"))
         try {

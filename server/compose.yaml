@@ -1,0 +1,47 @@
+# Both localization servers side by side on one GPU.
+#   docker compose up -d --build        LightGlue on :8001, MASt3R on :8002
+# To reuse what this machine already downloaded, set these (for example in a .env file):
+#   UV_HOST_CACHE=~/.cache/uv               Python wheels, at build time
+#   HF_HOST_CACHE=~/.cache/huggingface      MASt3R weights
+#   TORCH_HOST_CACHE=~/.cache/torch         ALIKED and LightGlue weights
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  lightglue:
+    <<: *gpu
+    image: path-tracer-vps:lightglue
+    build:
+      context: .
+      args: { MATCHER: lightglue }
+      additional_contexts:
+        uvcache: ${UV_HOST_CACHE:-./docker/no-cache}
+    ports: ["8001:8000"]
+    volumes:
+      - ${HF_HOST_CACHE:-hf}:/models/hf
+      - ${TORCH_HOST_CACHE:-torch}:/models/torch
+    restart: unless-stopped
+
+  mast3r:
+    <<: *gpu
+    image: path-tracer-vps:mast3r
+    build:
+      context: .
+      args: { MATCHER: mast3r }
+      additional_contexts:
+        uvcache: ${UV_HOST_CACHE:-./docker/no-cache}
+    ports: ["8002:8000"]
+    volumes:
+      - ${HF_HOST_CACHE:-hf}:/models/hf
+      - ${TORCH_HOST_CACHE:-torch}:/models/torch
+    restart: unless-stopped
+
+volumes:
+  hf:
+  torch:
