@@ -12,6 +12,8 @@ The answer's pose is where the query camera is inside the best reference camera'
 camera axes (x right, y up, z backward), meters.
 """
 
+import utils.transport
+import utils.session
 import json
 import logging
 import os
@@ -84,7 +86,8 @@ async def post_localize(request: Request):
         raise HTTPException(503, State.error or f"{MATCHER} is still loading")
     form = await request.form()
     try:
-        meta = json.loads(form["meta"])
+        raw = form["meta"]
+        meta = json.loads(await raw.read() if isinstance(raw, UploadFile) else raw)
         query = decode_image(await _file(form, "query"))
         refs_meta = meta["refs"][:MAX_REFS]
         refs = []

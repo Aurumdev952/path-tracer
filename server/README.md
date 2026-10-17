@@ -25,13 +25,15 @@ curl localhost:8001/health   # {"matcher":"lightglue","ready":true,...}
 curl localhost:8002/health   # MASt3R downloads ~2.7 GB of weights on first start
 ```
 
-Weights are kept in the `hf` and `torch` volumes. To reuse what this machine already downloaded (wheels from uv, model weights from local runs), put this in `server/.env`:
+Weights are kept in the `hf` and `torch` volumes, and downloaded wheels in a Docker build cache, so rebuilds are quick. To reuse what this machine already downloaded:
 
-```
-UV_HOST_CACHE=/home/you/.cache/uv
-HF_HOST_CACHE=/home/you/.cache/huggingface
-TORCH_HOST_CACHE=/home/you/.cache/torch
-```
+- **Wheels:** build once with `UV_SEED_CACHE=~/.cache/uv docker compose build`. It copies uv's cache into Docker's build cache. Don't leave it set: Docker copies the whole folder on every build, which can take tens of GB.
+- **Model weights:** put this in `server/.env`:
+
+  ```
+  HF_HOST_CACHE=/home/you/.cache/huggingface
+  TORCH_HOST_CACHE=/home/you/.cache/torch
+  ```
 
 If `docker run --gpus all` fails with `libEGL_nvidia.so.<old version>: no such file`, the CDI spec is stale after a driver update. Regenerate it with `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`.
 
