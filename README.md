@@ -1,6 +1,8 @@
 # Path Tracer
 
-**See where you've walked.** Path Tracer is a native Android augmented-reality app that draws a glowing trail on the floor behind you as you move through a room. Turn around and your path is there. Leave, come back later, and the same path reappears in the same place.
+**Find your way inside big buildings.** Path Tracer is a native Android augmented-reality app. Record the walk from a building's entrance to a room, share it with a friend, and their phone guides them there with arrows on the floor, through elevators, stairs and escalators.
+
+It also has a free-trail mode that draws a glowing trail on the floor behind you and brings it back on your next visit.
 
 <p align="center">
   <img src="docs/walking.jpg" width="300" alt="Walking: a magenta trail and a green start beacon drawn on the floor">
@@ -10,6 +12,22 @@
 <p align="center"><sub>Left: tracing a path from the start beacon. Right: the same trail restored after the app was closed and reopened.</sub></p>
 
 ## Features
+
+### Routes: record, share, follow
+
+- **Start from a photo.** At the entrance, photograph something flat and detailed: the building sign, a poster, a door plate. That photo is how a friend's phone knows where the route begins.
+- **Record by walking.** Walk to the destination. Tap **Floor change** at an elevator, stairs or an escalator, and **Arrived** at the end.
+- **Elevators.** Tracking breaks inside a moving lift, so after the ride you photograph a sign near the elevator (like the floor number) and carry on.
+- **Checkpoints.** On long routes, photograph a sign along the way. When a follower's camera sees it, the route snaps back into place, which cancels drift.
+- **Share as a file.** A route is one small `.pathroute` file. Send it on WhatsApp, email or anything else. It opens in Path Tracer.
+- **Follow in AR.** Point the camera at the entrance photo and the route appears. Only the next few meters show, as arrows flowing the way to walk. Turns get a big arrow on the floor and a card like "Turn left in 4 m". The phone buzzes before each turn.
+- **Never lost.** If the path is off screen, a big arrow tells you to turn left, right or around. Walk off the route and it points you back.
+- **Hidden behind walls.** On phones with ARCore depth, real walls and furniture hide the path behind them.
+- **Spoken directions.** "Turn left in 4 meters", "Take the elevator to floor 5". Tap **Voice on/off** to mute.
+- **Quick lock-on.** When you take the photo, the app measures the sign's real size from detected walls or depth, so ARCore can lock on almost at once.
+- **Works offline.** Photos are recognised on the phone with ARCore Augmented Images. No account, no server.
+
+### Free trail
 
 - **Live floor trail.** An animated ribbon follows you across the floor. Chevrons flow from the start toward where you are now, and the colour shifts from cyan (oldest) to magenta (newest).
 - **Start beacon.** A pulsing marker shows where the walk began.
@@ -47,9 +65,27 @@ cd path-tracer
 
 Or open the folder in Android Studio and press **Run**.
 
-### Use it
+### Record a route
 
-1. Open **Path Tracer** and allow camera access.
+1. Open **Path Tracer**, tap **Record a new route** and allow camera access.
+2. At the entrance, fit a sign, poster or door plate in the white box and tap the button. Move the phone slowly from side to side until it locks on.
+3. Walk to the destination.
+   - At an **elevator**: tap **Floor change → Elevator**, ride, then photograph a sign near the elevator when you step out.
+   - On **stairs or an escalator**: tap **Floor change** and pick it. Keep walking.
+   - On a long walk: tap **Checkpoint** now and then and photograph a sign.
+4. Tap **Arrived** and give the route a name.
+
+### Follow a route
+
+1. On the home screen tap **Share** on a route and send the file. Your friend opens it (or uses **Open route file**).
+2. They tap **Follow**, go to the entrance and point the camera at the sign in the photo.
+3. They follow the arrows. After an elevator ride, the app shows which sign to point at next.
+
+Good photos: flat, matte, lots of detail (text, logos, pictures), not too small in the box. Plain walls, glass and shiny screens don't work.
+
+### Free trail
+
+1. On the home screen tap **Free trail** and allow camera access.
 2. Choose a mode at the top of the screen.
    - **Marker:** place the `START HERE` marker where you begin (print it on A4, or show it full-screen on a monitor) and point the camera at it from about 0.5 to 1 m away.
    - **Cloud:** point the camera at the floor where you're standing.
@@ -79,15 +115,32 @@ Until this is set up, Cloud mode still traces live, but the status shows **not s
 
 ```
 app/src/main/java/rw/aurum/pathtracer/
-├── MainActivity.kt        Permissions, ARCore session setup, Compose overlay UI
-├── PathTracer.kt          Frame loop: finding the start, recording, cloud host/resolve, UI state
-├── Trail.kt               Data model (points in anchor space, memory mode) and JSON storage
+├── HomeActivity.kt        Route list, share, import, links to the other screens
+├── ArActivity.kt          Shared base: permissions, ARCore session, camera view
+├── ArRenderer.kt          Shared GL frame loop and event queue
+├── RecordActivity.kt      Recording screen
+├── RouteRecorder.kt       Recording: photos, locking on, legs, floor changes
+├── SignPhoto.kt           Cuts the framed sign out of ARCore's camera image
+├── FollowActivity.kt      Following screen: instruction card, look-here arrow, arrival
+├── RouteFollower.kt       Following: finds the photos, snaps the route, guides
+├── GuideRenderer.kt       OpenGL ES path, turn arrow and goal marker
+├── Guide.kt               Pure logic: route stretches, turn detection, progress, instructions
+├── Route.kt               Route data model and JSON format
+├── RouteStore.kt          Routes on disk, .pathroute export and import
+├── YawPose.kt, ArPoses.kt Upright poses, floor height
+├── TrailActivity.kt       Free-trail screen
+├── PathTracer.kt          Free trail: finding the start, recording, cloud host/resolve
+├── Trail.kt               Free-trail data model and JSON storage
 ├── TrailRenderer.kt       OpenGL ES ribbon and start-beacon shaders
 └── BackgroundRenderer.kt  Camera image rendering
 app/src/main/assets/start_marker.png   The marker image ARCore looks for
 ```
 
-All AR state lives on the GL render thread. The UI and ARCore callbacks send events to that thread through a queue, and the thread publishes a single `UiState` back to Compose. The room-recognition lifecycle is one `Room` state machine: finding start → (anchoring →) remembered, or relocalizing → remembered / not found.
+All AR state lives on the GL render thread. The UI and ARCore callbacks send events to that thread through a queue, and the thread publishes one UI state object back to Compose.
+
+A route is a list of **legs**. Each leg starts at a photo, and its points are stored in that photo's frame (levelled, so up is up). A leg begins at the entrance, after an elevator, or at a checkpoint. A checkpoint also stores where it sits relative to the previous leg, so legs joined by checkpoints are followed as one continuous **stretch**. Seeing any photo of a stretch re-anchors the whole stretch. Elevators start a new stretch.
+
+Run the logic tests with `./gradlew testDebugUnitTest`.
 
 ## Built with
 
@@ -97,15 +150,14 @@ All AR state lives on the GL render thread. The UI and ARCore callbacks send eve
 
 ## Limitations
 
-- The trail is drawn on top of everything, so walls and furniture don't hide it yet.
-- The phone keeps one trail at a time.
-- It assumes one floor level, taken from the lowest detected floor plane.
-- Accuracy depends on ARCore tracking. Fast motion, low light and blank walls cause drift.
+- On phones without ARCore depth, the path is drawn on top of everything. Follow mode limits this by only showing the next 7 m. The free trail is always drawn on top.
+- Free trail keeps one trail at a time and assumes one floor level.
+- Accuracy depends on ARCore tracking. Fast motion, low light and blank walls cause drift. Use checkpoints on long routes.
+- Photos must be of flat things. A sign that looks the same on every floor can be confused; pick ones that differ (like the floor number).
 
 ## Ideas for next steps
 
-- Hide the trail behind real objects with the ARCore Depth API.
-- Keep several named trails per room.
+- Hide the free trail behind real objects too.
 - Recognise a room offline with no marker, using an open-source mapping library such as [RTAB-Map](https://introlab.github.io/rtabmap/).
 
 ## Troubleshooting

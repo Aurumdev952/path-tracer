@@ -1,14 +1,6 @@
 package rw.aurum.pathtracer
 
-import android.Manifest
-import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
-import android.opengl.GLSurfaceView
-import android.os.Bundle
-import android.view.WindowManager
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -18,7 +10,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -35,139 +26,57 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.content.ContextCompat
-import com.google.ar.core.ArCoreApk
 import com.google.ar.core.AugmentedImageDatabase
 import com.google.ar.core.Config
 import com.google.ar.core.Session
-import com.google.ar.core.exceptions.UnavailableException
 import java.io.File
 
-class MainActivity : ComponentActivity() {
+/** Free-walk mode: a glowing trail behind you that comes back on your next visit. */
+class TrailActivity : ArActivity() {
 
     private val tracer by lazy { PathTracer(TrailStore(File(filesDir, "trail.json"))) }
-    private lateinit var glView: GLSurfaceView
-    private var session: Session? = null
-    private var installRequested = false
-    private val blocker = mutableStateOf<String?>(null)
+    override val renderer: ArRenderer get() = tracer
 
-    private val cameraPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (!granted) blocker.value = "Camera access is needed to trace your path."
-        }
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        @Suppress("DEPRECATION")
-        tracer.displayRotation = { windowManager.defaultDisplay.rotation }
-        glView = GLSurfaceView(this).apply {
-            preserveEGLContextOnPause = true
-            setEGLContextClientVersion(2)
-            setEGLConfigChooser(8, 8, 8, 8, 16, 0)
-            setRenderer(tracer)
-            renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
-        }
-        setContent {
-            MaterialTheme(colorScheme = darkColorScheme(primary = Accent)) {
-                val ui by tracer.state.collectAsState()
-                Box(Modifier.fillMaxSize().background(Color.Black)) {
-                    AndroidView(factory = { glView }, modifier = Modifier.fillMaxSize())
-                    val message = blocker.value
-                    if (message != null) BlockerScreen(message) else Overlay(
-                        ui = ui,
-                        onToggle = tracer::toggleRecording,
-                        onNewTrail = tracer::newTrail,
-                        onRetry = tracer::retrySaveRoom,
-                        onMemory = tracer::useMemory,
-                    )
-                }
-            }
+    override fun configure(session: Session, config: Config) {
+        config.cloudAnchorMode = Config.CloudAnchorMode.ENABLED
+        config.augmentedImageDatabase = AugmentedImageDatabase(session).apply {
+            assets.open("start_marker.png").use { addImage("start", BitmapFactory.decodeStream(it)) }
         }
     }
 
-    override fun onResume() {
-        super.onResume()
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            cameraPermission.launch(Manifest.permission.CAMERA)
-            return
-        }
-        val session = session ?: createSession() ?: return
-        try {
-            session.resume()
-        } catch (e: Exception) {
-            blocker.value = "Couldn't open the camera: ${e.message}"
-            return
-        }
-        glView.onResume()
-    }
-
-    private fun createSession(): Session? = try {
-        when (ArCoreApk.getInstance().requestInstall(this, !installRequested)) {
-            ArCoreApk.InstallStatus.INSTALL_REQUESTED -> {
-                installRequested = true
-                null
-            }
-            ArCoreApk.InstallStatus.INSTALLED -> Session(this).also { session ->
-                session.configure(
-                    Config(session).apply {
-                        cloudAnchorMode = Config.CloudAnchorMode.ENABLED
-                        planeFindingMode = Config.PlaneFindingMode.HORIZONTAL
-                        focusMode = Config.FocusMode.AUTO
-                        updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
-                        augmentedImageDatabase = AugmentedImageDatabase(session).apply {
-                            assets.open("start_marker.png").use { addImage("start", BitmapFactory.decodeStream(it)) }
-                        }
-                    }
-                )
-                this.session = session
-                tracer.attach(session)
-            }
-        }
-    } catch (e: UnavailableException) {
-        blocker.value = "This device can't run ARCore (${e.javaClass.simpleName.removePrefix("Unavailable").removeSuffix("Exception")})."
-        null
+    @Composable
+    override fun Overlay() {
+        val ui by tracer.state.collectAsState()
+        TrailOverlay(
+            ui = ui,
+            onToggle = tracer::toggleRecording,
+            onNewTrail = tracer::newTrail,
+            onRetry = tracer::retrySaveRoom,
+            onMemory = tracer::useMemory,
+        )
     }
 
     override fun onPause() {
         super.onPause()
-        if (session != null) {
-            glView.onPause()
-            session?.pause()
-        }
         tracer.persist()
-    }
-
-    override fun onDestroy() {
-        session?.close()
-        session = null
-        super.onDestroy()
     }
 }
 
-private val Accent = Color(0xFF2EE6C8)
-private val Glass = Color(0xB3101418)
-
 @Composable
-private fun Overlay(
+private fun TrailOverlay(
     ui: UiState,
     onToggle: () -> Unit,
     onNewTrail: () -> Unit,
@@ -280,23 +189,5 @@ private fun MemoryPicker(selected: Memory, onPick: (Memory) -> Unit) {
                     .padding(horizontal = 14.dp, vertical = 7.dp),
             )
         }
-    }
-}
-
-@Composable
-private fun Reticle(modifier: Modifier) {
-    val scale by rememberInfiniteTransition(label = "reticle").animateFloat(
-        initialValue = 0.85f, targetValue = 1.1f,
-        animationSpec = infiniteRepeatable(tween(1100), RepeatMode.Reverse), label = "scale",
-    )
-    Box(modifier.size(64.dp).scale(scale).border(2.dp, Color.White.copy(alpha = 0.85f), CircleShape), contentAlignment = Alignment.Center) {
-        Box(Modifier.size(8.dp).background(Accent, CircleShape))
-    }
-}
-
-@Composable
-private fun BlockerScreen(message: String) {
-    Box(Modifier.fillMaxSize().background(Color.Black).padding(32.dp), contentAlignment = Alignment.Center) {
-        Text(message, color = Color.White, textAlign = TextAlign.Center, fontSize = 18.sp)
     }
 }
