@@ -188,6 +188,20 @@ class GuideTest {
         )
     }
 
+    @Test fun sceneLegsNeedTheNewFormatAndOldRoutesStayCompatible() {
+        val signs = route(leg(walk(0f to 0f, 0f to -1f)))
+        assertEquals(1, signs.toJson().getInt("format"))
+        val scene = route(leg(walk(0f to 0f, 0f to -1f)).copy(sign = false))
+        assertEquals(2, scene.toJson().getInt("format"))
+        assertFalse(Route.fromJson(JSONObject(scene.toJson().toString())).legs[0].sign)
+        // Routes saved before views existed still load, as sign legs with no views.
+        val old = JSONObject(signs.toJson().toString())
+        old.getJSONArray("legs").getJSONObject(0).apply { remove("sign"); remove("views") }
+        val back = Route.fromJson(old).legs[0]
+        assertTrue(back.sign)
+        assertTrue(back.views.isEmpty())
+    }
+
     @Test fun formatsDistances() {
         assertEquals("4 m", meters(4.1f))
         assertEquals("4.5 m", meters(4.4f))

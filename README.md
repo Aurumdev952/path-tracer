@@ -160,6 +160,10 @@ Run the logic tests with `./gradlew testDebugUnitTest`.
 - Hide the free trail behind real objects too.
 - Recognise a room offline with no marker, using an open-source mapping library such as [RTAB-Map](https://introlab.github.io/rtabmap/).
 
+## Experimental: self-hosted localization server
+
+Instead of a flat sign, a route can start from the scene itself. A self-hosted server (in [`server/`](server/README.md), Docker plus GPU) matches the follower's camera image against camera views saved while recording. Two matchers run side by side for comparison: LightGlue (Apache-2.0) and MASt3R (non-commercial). Turn it on in debug mode with **Localization server**.
+
 ## Debug mode
 
 Long-press the **Path Tracer** title on the home screen to turn debug mode on or off.

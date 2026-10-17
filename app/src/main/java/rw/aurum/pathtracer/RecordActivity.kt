@@ -60,7 +60,8 @@ import java.io.File
 class RecordActivity : ArActivity() {
 
     private val store by lazy { RouteStore(File(filesDir, "routes")) }
-    private val recorder by lazy { RouteRecorder(store) }
+    private val vps by lazy { VpsSettings.load(this) }
+    private val recorder by lazy { RouteRecorder(store, captureViews = vps.enabled) }
     override val renderer: ArRenderer get() = recorder
     override val wantsSharpImages = true
 
@@ -100,6 +101,7 @@ class RecordActivity : ArActivity() {
             },
             onFinish = recorder::finish,
             onDiscard = ::finish,
+            onUseScene = recorder::useScene.takeIf { vps.enabled },
         )
     }
 }
@@ -114,6 +116,8 @@ private fun RecordOverlay(
     onFloorChange: (FloorChange, String) -> Unit,
     onFinish: (String) -> Unit,
     onDiscard: () -> Unit,
+    /** Start a leg without a sign, found later by the localization server. Null when no server is set. */
+    onUseScene: (() -> Unit)?,
 ) {
     var askFloor by remember { mutableStateOf(false) }
     var askName by remember { mutableStateOf(false) }
@@ -163,13 +167,18 @@ private fun RecordOverlay(
                 if (text != null) Hint(text, Modifier.padding(bottom = 12.dp))
 
                 when (stage) {
-                    is RecordStage.Capture -> Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (reason == PhotoFor.Checkpoint) {
-                            OutlinedButton(onClick = onCancelCheckpoint) { Text("Cancel") }
-                            Spacer(Modifier.size(24.dp))
+                    is RecordStage.Capture -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (reason == PhotoFor.Checkpoint) {
+                                OutlinedButton(onClick = onCancelCheckpoint) { Text("Cancel") }
+                                Spacer(Modifier.size(24.dp))
+                            }
+                            Shutter(onShutter)
+                            if (reason == PhotoFor.Checkpoint) Spacer(Modifier.size(96.dp))
                         }
-                        Shutter(onShutter)
-                        if (reason == PhotoFor.Checkpoint) Spacer(Modifier.size(96.dp))
+                        if (onUseScene != null) {
+                            TextButton(onClick = onUseScene) { Text("No good sign? Use the scene (server)") }
+                        }
                     }
                     is RecordStage.Locking -> Row(
                         Modifier.fillMaxWidth().background(Glass, RoundedCornerShape(24.dp)).padding(12.dp),

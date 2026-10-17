@@ -10,7 +10,8 @@
     <application
         android:label="Path Tracer"
         android:icon="@android:drawable/ic_menu_mylocation"
-        android:theme="@style/Theme.PathTracer">
+        android:theme="@style/Theme.PathTracer"
+        android:usesCleartextTraffic="true">
 
         <meta-data android:name="com.google.ar.core" android:value="required" />
 

@@ -6,6 +6,7 @@ import com.google.ar.core.Anchor
 import com.google.ar.core.AugmentedImage
 import com.google.ar.core.AugmentedImageDatabase
 import com.google.ar.core.Frame
+import com.google.ar.core.Pose
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.ImageInsufficientQualityException
@@ -13,6 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
 import java.util.UUID
+import kotlin.math.hypot
 
 /** Why the recorder is asking for a photo. */
 sealed interface PhotoFor {
@@ -44,15 +46,30 @@ data class RecordUi(
  * Records a route as legs, each measured from a photographed sign. All state lives on the GL
  * thread; the UI talks to it through the public methods, which queue events.
  */
-class RouteRecorder(private val store: RouteStore) : ArRenderer() {
+class RouteRecorder(
+    private val store: RouteStore,
+    /** Save full camera views at the start of each leg, for the localization server. */
+    private val captureViews: Boolean,
+) : ArRenderer() {
 
     private val _state = MutableStateFlow(RecordUi())
     val state: StateFlow<RecordUi> = _state
 
-    private class LegDraft(val photo: String, val width: Float, val entry: LegEntry, val anchor: Anchor) {
+    private class LegDraft(
+        val index: Int,
+        val photo: String,
+        val width: Float,
+        val entry: LegEntry,
+        val anchor: Anchor,
+        val sign: Boolean,
+    ) {
         val points = mutableListOf<TrailPoint>()
         val steps = mutableListOf<Step>()
-        fun toLeg() = Leg(photo, width, entry, points.toList(), steps.toList())
+        val views = mutableListOf<CameraView>()
+        val viewPoses = mutableListOf<Pose>()
+        val startedAt = SystemClock.elapsedRealtime()
+        var lastViewAt = 0L
+        fun toLeg() = Leg(photo, width, entry, points.toList(), steps.toList(), sign, views.toList())
     }
 
     private val trailRenderer = TrailRenderer()
@@ -64,6 +81,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     /** The leg being walked. During a checkpoint photo the previous leg keeps recording. */
     private var current: LegDraft? = null
     private var captureRequested = false
+    private var sceneRequested = false
     private var pendingImage: String? = null
     private var pendingPhoto: String? = null
     /** The pending photo's size was measured, so ARCore needs no extra looks to place it. */
@@ -81,6 +99,9 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     private val startTime = SystemClock.elapsedRealtime()
 
     fun takePhoto() = post { if (stage is RecordStage.Capture) captureRequested = true }
+
+    /** No usable sign here: start the leg from where the phone is, to be found by the server later. */
+    fun useScene() = post { if (stage is RecordStage.Capture && captureViews) sceneRequested = true }
 
     fun retake() = post {
         val s = stage
@@ -153,6 +174,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         var frameHint = trackingHint(camera)
 
         if (tracking && captureRequested) capture(session, frame)
+        if (tracking && sceneRequested) startFromScene(session, frame)
         val s = stage
         if (tracking && s is RecordStage.Locking) frameHint = frameHint ?: lockOn(session, s)
 
@@ -170,6 +192,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             leg.anchor.pose.toMatrix(model, 0)
             val seconds = (SystemClock.elapsedRealtime() - startTime) / 1000f
             trailRenderer.draw(leg.points, head, model, view, projection, seconds)
+            if (captureViews) collectView(frame, leg)
         }
         publish(frameHint)
     }
@@ -219,22 +242,10 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         if (lockFrames == 0) debug?.event("photo_seen", "after_ms" to SystemClock.elapsedRealtime() - lockStartedAt)
         if (++lockFrames < (if (pendingMeasured) LOCK_FRAMES_MEASURED else LOCK_FRAMES)) return null
 
-        val pose = levelled(image.centerPose)
-        val anchor = session.createAnchor(pose)
-        val previous = current
-        val entry = when (val reason = s.reason) {
-            PhotoFor.Start -> LegEntry.Start
-            is PhotoFor.Elevator -> LegEntry.Elevator(reason.floor)
-            PhotoFor.Checkpoint -> {
-                if (previous == null) return null
-                LegEntry.Checkpoint(previous.anchor.pose.inverse().compose(pose).toYawPose())
-            }
-        }
-        if (previous != null) {
-            legs += previous.toLeg()
-            previous.anchor.detach()
-        }
-        current = LegDraft(pendingPhoto!!, image.extentX.takeIf { it > 0f && it.isFinite() } ?: 0f, entry, anchor)
+        val entry = startLeg(
+            session, levelled(image.centerPose), s.reason, pendingPhoto!!,
+            image.extentX.takeIf { it > 0f && it.isFinite() } ?: 0f, sign = true,
+        ) ?: return null
         debug?.event(
             "locked",
             "leg" to legs.size,
@@ -247,6 +258,71 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         stage = RecordStage.Walking
         hint = null
         return null
+    }
+
+    /** Starts a leg whose frame is [pose], ending the previous one if this is a checkpoint. */
+    private fun startLeg(session: Session, pose: Pose, reason: PhotoFor, photo: String, width: Float, sign: Boolean): LegEntry? {
+        val previous = current
+        val entry = when (reason) {
+            PhotoFor.Start -> LegEntry.Start
+            is PhotoFor.Elevator -> LegEntry.Elevator(reason.floor)
+            PhotoFor.Checkpoint -> {
+                if (previous == null) return null
+                LegEntry.Checkpoint(previous.anchor.pose.inverse().compose(pose).toYawPose())
+            }
+        }
+        val anchor = session.createAnchor(pose)
+        val index = legs.size + if (previous != null) 1 else 0
+        if (previous != null) {
+            legs += previous.toLeg()
+            previous.anchor.detach()
+        }
+        current = LegDraft(index, photo, width, entry, anchor, sign)
+        return entry
+    }
+
+    private fun startFromScene(session: Session, frame: Frame) {
+        val s = stage as? RecordStage.Capture ?: return
+        // A photo for the follower to recognise the spot; it isn't used for tracking.
+        val bitmap = SignPhoto.capture(frame, width, height) ?: return
+        sceneRequested = false
+        val index = legs.size + if (current != null) 1 else 0
+        val photo = "leg$index.jpg"
+        saveJpeg(bitmap, File(store.draft, photo))
+        // The screen's axes, levelled: the frame's heading is where the phone faces.
+        val entry = startLeg(session, levelled(frame.camera.displayOrientedPose), s.reason, photo, 0f, sign = false) ?: return
+        debug?.event("scene_start", "leg" to index, "entry" to entry.javaClass.simpleName.lowercase())
+        stage = RecordStage.Walking
+        hint = null
+    }
+
+    /**
+     * Saves up to a few camera views in the first seconds of a leg, each from a clearly different
+     * spot or angle, so a follower's camera has more to match against.
+     */
+    private fun collectView(frame: Frame, leg: LegDraft) {
+        val now = SystemClock.elapsedRealtime()
+        if (leg.views.size >= MAX_VIEWS || now - leg.startedAt > VIEW_WINDOW_MS || now - leg.lastViewAt < VIEW_GAP_MS) return
+        val pose = frame.camera.pose
+        val distinct = leg.viewPoses.all { seen ->
+            val moved = hypot(hypot(pose.tx() - seen.tx(), pose.ty() - seen.ty()), pose.tz() - seen.tz())
+            moved > VIEW_MIN_MOVE || angleBetween(pose, seen) > VIEW_MIN_TURN
+        }
+        if (!distinct) return
+        val grabbed = CameraViews.grab(frame, frame.camera, withDepth = true) ?: return
+        leg.lastViewAt = now
+        val view = CameraViews.save(grabbed, leg.anchor.pose, store.draft, "leg${leg.index}_v${leg.views.size}")
+        leg.views += view
+        leg.viewPoses += pose
+        debug?.event("view", "leg" to leg.index, "n" to leg.views.size, "depth" to (grabbed.depth != null), "jpeg_kb" to grabbed.jpeg.size / 1024)
+    }
+
+    /** Angle between two camera's viewing directions, in radians. */
+    private fun angleBetween(a: Pose, b: Pose): Float {
+        val za = a.zAxis
+        val zb = b.zAxis
+        val dot = (za[0] * zb[0] + za[1] * zb[1] + za[2] * zb[2]).coerceIn(-1f, 1f)
+        return kotlin.math.acos(dot)
     }
 
     private fun publish(frameHint: String?) {
@@ -286,6 +362,11 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         const val STEP_METERS = 0.12f
         const val LOCK_FRAMES = 20
         const val LOCK_FRAMES_MEASURED = 6
+        const val MAX_VIEWS = 3
+        const val VIEW_WINDOW_MS = 5000L
+        const val VIEW_GAP_MS = 400L
+        const val VIEW_MIN_MOVE = 0.15f
+        const val VIEW_MIN_TURN = 0.14f
         const val SLOW_LOCK_MS = 8000L
         const val MIN_ROUTE_METERS = 1f
         const val NOTICE_MS = 5000L

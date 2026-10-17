@@ -31,12 +31,14 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,6 +61,7 @@ class HomeActivity : ComponentActivity() {
     private val store by lazy { RouteStore(File(filesDir, "routes")) }
     private val routes = mutableStateOf<List<Route>>(emptyList())
     private val debugLogs = mutableStateOf<Int?>(null)
+    private val vps = mutableStateOf(VpsSettings())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -90,6 +93,12 @@ class HomeActivity : ComponentActivity() {
                         DebugLog.clear(this)
                         refresh()
                     },
+                    vps = vps.value,
+                    onVps = {
+                        it.save(this)
+                        vps.value = it
+                    },
+                    checkServer = { url -> withContext(Dispatchers.IO) { VpsClient.health(url) } },
                 )
             }
         }
@@ -107,6 +116,7 @@ class HomeActivity : ComponentActivity() {
     }
 
     private fun refresh() {
+        vps.value = VpsSettings.load(this)
         lifecycleScope.launch {
             routes.value = withContext(Dispatchers.IO) { store.list() }
             debugLogs.value = if (DebugLog.isEnabled(this@HomeActivity)) {
@@ -213,7 +223,11 @@ private fun Home(
     onToggleDebug: () -> Unit,
     onShareLogs: () -> Unit,
     onClearLogs: () -> Unit,
+    vps: VpsSettings,
+    onVps: (VpsSettings) -> Unit,
+    checkServer: suspend (String) -> String,
 ) {
+    var editingVps by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<Route?>(null) }
     var deleting by remember { mutableStateOf<Route?>(null) }
 
@@ -275,6 +289,8 @@ private fun Home(
                         OutlinedButton(onClick = onShareLogs, enabled = debugLogs > 0) { Text("Share logs") }
                         TextButton(onClick = onClearLogs, enabled = debugLogs > 0) { Text("Clear") }
                     }
+                    Spacer(Modifier.size(4.dp))
+                    OutlinedButton(onClick = { editingVps = true }) { Text("Localization server: ${vps.method.label}") }
                 }
             }
         }
@@ -293,6 +309,10 @@ private fun Home(
             },
         )
     }
+    if (editingVps) VpsDialog(vps, onDismiss = { editingVps = false }, onSave = {
+        editingVps = false
+        onVps(it)
+    }, checkServer = checkServer)
     deleting?.let { route ->
         AlertDialog(
             onDismissRequest = { deleting = null },
@@ -356,4 +376,55 @@ private fun RouteCard(
             }
         }
     }
+}
+
+/** Experimental: which self-hosted localization server(s) the follower and recorder use. */
+@Composable
+private fun VpsDialog(
+    initial: VpsSettings,
+    onDismiss: () -> Unit,
+    onSave: (VpsSettings) -> Unit,
+    checkServer: suspend (String) -> String,
+) {
+    var method by remember { mutableStateOf(initial.method) }
+    var lightGlue by remember { mutableStateOf(initial.lightGlueUrl) }
+    var mast3r by remember { mutableStateOf(initial.mast3rUrl) }
+    var status by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Localization server") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "Finds where a route starts from the camera view, without a sign. Over USB run " +
+                        "adb reverse tcp:8001 tcp:8001 and tcp:8002, or use the laptop's IP on Wi-Fi.",
+                    fontSize = 13.sp, color = Color.White.copy(alpha = 0.7f),
+                )
+                Row(Modifier.background(Color.White.copy(alpha = 0.08f), RoundedCornerShape(50)).padding(3.dp)) {
+                    VpsMethod.entries.forEach { m ->
+                        val active = m == method
+                        Text(
+                            m.label,
+                            color = if (active) Color.Black else Color.White,
+                            fontSize = 12.sp,
+                            modifier = Modifier
+                                .background(if (active) Accent else Color.Transparent, RoundedCornerShape(50))
+                                .clickable { method = m }
+                                .padding(horizontal = 9.dp, vertical = 6.dp),
+                        )
+                    }
+                }
+                OutlinedTextField(lightGlue, { lightGlue = it.trim() }, label = { Text("LightGlue server") }, singleLine = true)
+                OutlinedTextField(mast3r, { mast3r = it.trim() }, label = { Text("MASt3R server") }, singleLine = true)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { scope.launch { status = "LightGlue: " + checkServer(lightGlue) } }) { Text("Test LightGlue") }
+                    TextButton(onClick = { scope.launch { status = "MASt3R: " + checkServer(mast3r) } }) { Text("Test MASt3R") }
+                }
+                if (status.isNotEmpty()) Text(status, fontSize = 13.sp, color = Warn)
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(VpsSettings(method, lightGlue, mast3r)) }) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }

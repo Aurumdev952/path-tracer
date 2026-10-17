@@ -42,7 +42,11 @@ data class FollowUi(
  * Guides a follower along a saved route. Photos in the route are ARCore Augmented Images named
  * `leg<index>`; seeing one fixes where the route is in the room.
  */
-class RouteFollower(route: Route) : ArRenderer() {
+class RouteFollower(
+    private val route: Route,
+    private val store: RouteStore,
+    private val vps: VpsSettings,
+) : ArRenderer() {
 
     private val _state = MutableStateFlow(FollowUi())
     val state: StateFlow<FollowUi> = _state
@@ -68,6 +72,21 @@ class RouteFollower(route: Route) : ArRenderer() {
     /** Stretch, maneuver and kind of the instruction last spoken, so each is said once. */
     private var spokenFor: Triple<Int, Int, Instruction.Kind>? = null
     private var searchStartedAt = SystemClock.elapsedRealtime()
+    private var lockedAt = 0L
+
+    private class Refs(val leg: Int, val views: List<RefView>)
+    private class VpsResult(
+        val server: String, val stretch: Int, val leg: Int, val refs: Refs,
+        val queryPose: Pose, val fix: VpsFix?, val why: String?, val ms: Long,
+    )
+    private class Candidate(val at: Long, val stretch: Int, val world: Pose)
+
+    private val client = if (vps.enabled) VpsClient() else null
+    private val vpsResults = java.util.concurrent.ConcurrentLinkedQueue<VpsResult>()
+    private val refsByStretch = HashMap<Int, Refs?>()
+    private val candidates = ArrayDeque<Candidate>()
+    private var vpsInFlight = 0
+    private var lastQueryAt = 0L
     private var lastSample = 0L
     private var wasOffRoute = false
 
@@ -104,6 +123,8 @@ class RouteFollower(route: Route) : ArRenderer() {
 
         if (camera.trackingState == TrackingState.TRACKING && stage != FollowStage.Arrived) {
             snapToPhotos(session, frame)
+            takeVpsResults(session)
+            askVps(frame, camera)
             val anchor = anchor
             if (stage == FollowStage.Guiding && anchor != null) {
                 if (anchor.trackingState == TrackingState.TRACKING) {
@@ -149,7 +170,10 @@ class RouteFollower(route: Route) : ArRenderer() {
                 }
             }
             navigator.lockOn(leg)
-            if (moving) spokenFor = null
+            if (moving) {
+                spokenFor = null
+                lockedAt = SystemClock.elapsedRealtime()
+            }
             stage = FollowStage.Guiding
             dropAnchor()
             anchor = session.createAnchor(world)
@@ -158,6 +182,106 @@ class RouteFollower(route: Route) : ArRenderer() {
             return
         }
     }
+
+    /** Stops background work; call when the screen closes. */
+    fun release() {
+        client?.shutdown()
+    }
+
+    /** Reference views for a stretch: those of its first leg that has any. */
+    private fun refsFor(stretch: Int): Refs? = refsByStretch.getOrPut(stretch) {
+        navigator.stretches[stretch].images.map { it.leg }.firstOrNull { route.legs[it].views.isNotEmpty() }?.let { leg ->
+            Refs(
+                leg,
+                route.legs[leg].views.mapNotNull { v ->
+                    val image = store.file(route, v.image).takeIf { it.exists() } ?: return@mapNotNull null
+                    RefView(image.readBytes(), v.depth?.let { store.file(route, it) }?.takeIf { it.exists() }?.readBytes(), v)
+                },
+            ).takeIf { it.views.isNotEmpty() }
+        }
+    }
+
+    /**
+     * Asks the server(s) where the camera is, about once a second: while looking for a stretch's
+     * start, and for a while after locking on so debug logs can compare it with that lock.
+     */
+    private fun askVps(frame: Frame, camera: Camera) {
+        val client = client ?: return
+        val now = SystemClock.elapsedRealtime()
+        val stretch = when (val s = stage) {
+            is FollowStage.Searching -> s.stretch
+            FollowStage.Guiding -> navigator.stretch.takeIf { debug != null && now - lockedAt < COMPARE_MS } ?: return
+            FollowStage.Arrived -> return
+        }
+        if (vpsInFlight > 0 || now - lastQueryAt < QUERY_GAP_MS) return
+        val refs = refsFor(stretch) ?: return
+        val query = CameraViews.grab(frame, camera, withDepth = false) ?: return
+        lastQueryAt = now
+        for ((server, url) in vps.servers) {
+            vpsInFlight++
+            client.localize(server, url, query, refs.views) { fix, why, ms ->
+                vpsResults.add(VpsResult(server, stretch, refs.leg, refs, query.pose, fix, why, ms))
+            }
+        }
+    }
+
+    private fun takeVpsResults(session: Session) {
+        while (true) {
+            val r = vpsResults.poll() ?: return
+            vpsInFlight--
+            val fix = r.fix
+            if (fix == null) {
+                debug?.event("vps_fail", "server" to r.server, "why" to r.why, "ms" to r.ms)
+                continue
+            }
+            // The reference camera inside the leg, the query camera inside the reference camera,
+            // and the query camera in the world give the leg's frame in the world.
+            val camRInLeg = r.refs.views[fix.ref].view.pose.toPose()
+            val camQInLeg = camRInLeg.compose(fix.pose)
+            val legWorld = levelled(r.queryPose.compose(camQInLeg.inverse()))
+            val inStretch = navigator.stretches[r.stretch].images.first { it.leg == r.leg }.pose
+            val world = legWorld.compose(inStretch.inverse().toPose())
+
+            val current = anchor?.pose?.takeIf { stage == FollowStage.Guiding && r.stretch == navigator.stretch }
+            val gap = current?.let { distance(it, world) }
+            val turn = current?.let { Math.toDegrees((world.toYawPose().yaw - it.toYawPose().yaw).toDouble()) }
+            debug?.event(
+                "vps", "server" to r.server, "ref" to fix.ref, "inliers" to fix.inliers, "reproj_px" to fix.reprojectionPx,
+                "depth" to fix.depth, "server_ms" to fix.serverMs, "round_ms" to r.ms,
+                "vs_lock_m" to gap, "vs_lock_deg" to turn,
+            )
+            debug?.show("vps_${r.server}", "${fix.inliers}in ${r.ms}ms" + (gap?.let { " Δ%.2fm".format(java.util.Locale.US, it) } ?: ""))
+
+            val searching = (stage as? FollowStage.Searching)?.stretch ?: continue
+            if (r.stretch != searching) continue
+            val now = SystemClock.elapsedRealtime()
+            while (candidates.isNotEmpty() && now - candidates.first().at > AGREE_WITHIN_MS) candidates.removeFirst()
+            val agrees = candidates.any {
+                it.stretch == r.stretch && distance(it.world, world) < AGREE_METERS &&
+                    abs(it.world.toYawPose().yaw - world.toYawPose().yaw) < AGREE_RADIANS
+            }
+            if (fix.inliers >= STRONG_INLIERS || agrees) {
+                lockFromServer(session, r, world)
+            } else {
+                candidates.addLast(Candidate(now, r.stretch, world))
+            }
+        }
+    }
+
+    private fun lockFromServer(session: Session, r: VpsResult, world: Pose) {
+        debug?.event("found", "via" to r.server, "leg" to r.leg, "stretch" to r.stretch, "after_ms" to SystemClock.elapsedRealtime() - searchStartedAt)
+        navigator.lockOn(r.leg)
+        spokenFor = null
+        stage = FollowStage.Guiding
+        dropAnchor()
+        anchor = session.createAnchor(world)
+        lastSnap = world
+        lastSnapFrame = frameCount
+        lockedAt = SystemClock.elapsedRealtime()
+        candidates.clear()
+    }
+
+    private fun distance(a: Pose, b: Pose) = hypot(hypot(a.tx() - b.tx(), a.ty() - b.ty()), a.tz() - b.tz())
 
     private fun movedEnough(world: Pose): Boolean {
         val last = lastSnap ?: return true
@@ -318,6 +442,12 @@ class RouteFollower(route: Route) : ArRenderer() {
         const val BUZZ_DISTANCE = 3f
         const val SKIP_WITHIN = 10f
         const val SAMPLE_MS = 1000L
+        const val QUERY_GAP_MS = 1000L
+        const val COMPARE_MS = 20_000L
+        const val AGREE_WITHIN_MS = 4000L
+        const val AGREE_METERS = 0.35f
+        val AGREE_RADIANS = Math.toRadians(6.0).toFloat()
+        const val STRONG_INLIERS = 80
         const val SNAP_EVERY_FRAMES = 15
         const val SNAP_METERS = 0.04f
         const val SNAP_RADIANS = 0.03f

@@ -1,0 +1,6 @@
+.venv
+third_party
+tests
+**/__pycache__
+.pytest_cache
+docker
