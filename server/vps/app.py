@@ -84,7 +84,8 @@ async def post_localize(request: Request):
         raise HTTPException(503, State.error or f"{MATCHER} is still loading")
     form = await request.form()
     try:
-        meta = json.loads(form["meta"])
+        raw = form["meta"]
+        meta = json.loads(await raw.read() if isinstance(raw, UploadFile) else raw)
         query = decode_image(await _file(form, "query"))
         refs_meta = meta["refs"][:MAX_REFS]
         refs = []
