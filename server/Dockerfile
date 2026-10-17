@@ -16,20 +16,24 @@ ENV UV_LINK_MODE=copy \
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 
-# The "uvcache" build context is an empty folder by default. Point it at a host uv cache
-# (UV_HOST_CACHE=~/.cache/uv docker compose build) to reuse wheels already downloaded there.
-RUN --mount=type=bind,from=uvcache,target=/uvcache,rw \
+# Downloads go to a cache Docker keeps between builds. The "uvseed" build context is an empty
+# folder by default; pointing it at a host uv cache once (UV_SEED_CACHE=~/.cache/uv) copies the
+# wheels already downloaded there into that cache, so the first build doesn't fetch them again.
+RUN --mount=type=cache,id=path-tracer-uv,target=/uvcache \
+    --mount=type=bind,from=uvseed,target=/uvseed \
+    cp -a -n /uvseed/. /uvcache/ 2>/dev/null; true
+RUN --mount=type=cache,id=path-tracer-uv,target=/uvcache \
     uv sync --frozen --no-dev --no-install-project
 
 ARG MATCHER=lightglue
-RUN --mount=type=bind,from=uvcache,target=/uvcache,rw \
+RUN --mount=type=cache,id=path-tracer-uv,target=/uvcache \
     uv sync --frozen --no-dev --no-install-project --extra ${MATCHER}
 
 COPY scripts ./scripts
 RUN if [ "${MATCHER}" = "mast3r" ]; then ./scripts/fetch_mast3r.sh /opt/mast3r; fi
 
 COPY vps ./vps
-RUN --mount=type=bind,from=uvcache,target=/uvcache,rw \
+RUN --mount=type=cache,id=path-tracer-uv,target=/uvcache \
     uv sync --frozen --no-dev --extra ${MATCHER}
 
 # Model weights download on first start into /models; mount a volume there to keep them.
