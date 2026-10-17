@@ -13,8 +13,8 @@ android {
         applicationId = "rw.aurum.pathtracer"
         minSdk = 24
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "0.2"
     }
 
     compileOptions {
@@ -33,4 +33,6 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.arcore)
     implementation(libs.play.services.auth)
+    testImplementation(libs.junit)
+    testImplementation(libs.org.json)
 }
