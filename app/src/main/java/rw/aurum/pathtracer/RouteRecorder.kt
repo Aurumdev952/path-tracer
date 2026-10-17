@@ -85,6 +85,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     fun retake() = post {
         val s = stage
         if (s is RecordStage.Locking) {
+            debug?.event("retake", "after_ms" to SystemClock.elapsedRealtime() - lockStartedAt, "seen_frames" to lockFrames)
             stage = RecordStage.Capture(s.reason)
             hint = null
         }
@@ -95,6 +96,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         val leg = current ?: return@post
         if (stage != RecordStage.Walking) return@post
         this.floor = floor
+        debug?.event("floor_change", "change" to change.name.lowercase(), "floor" to floor, "leg" to legs.size, "points" to leg.points.size)
         if (change == FloorChange.Elevator) {
             legs += leg.toLeg()
             leg.anchor.detach()
@@ -105,13 +107,19 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         }
     }
 
-    fun addCheckpoint() = post { if (stage == RecordStage.Walking) stage = RecordStage.Capture(PhotoFor.Checkpoint) }
+    fun addCheckpoint() = post {
+        if (stage == RecordStage.Walking) {
+            debug?.event("checkpoint")
+            stage = RecordStage.Capture(PhotoFor.Checkpoint)
+        }
+    }
 
     /** Cancels a checkpoint photo and carries on walking. */
     fun cancelCheckpoint() = post {
         val s = stage
         val reason = (s as? RecordStage.Capture)?.reason ?: (s as? RecordStage.Locking)?.reason
         if (reason == PhotoFor.Checkpoint) {
+            debug?.event("checkpoint_cancel")
             stage = RecordStage.Walking
             hint = null
         }
@@ -121,6 +129,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         if (stage is RecordStage.Saved) return@post
         if (walkedMeters() < MIN_ROUTE_METERS) {
             notice("Walk a few steps first")
+            debug?.event("finish_too_short", "meters" to walkedMeters())
             return@post
         }
         current?.let { leg ->
@@ -132,6 +141,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         val kept = legs.filter { it.points.isNotEmpty() }
         val route = Route(UUID.randomUUID().toString(), name.trim().ifEmpty { "My route" }, System.currentTimeMillis(), kept)
         store.saveDraft(route)
+        debug?.event("saved", "route" to route.id, "legs" to kept.size, "meters" to route.lengthMeters, "floors" to route.floors.joinToString(","))
         stage = RecordStage.Saved(route.id)
     }
 
@@ -176,8 +186,11 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             if (measured != null) db.addImage(imageName, bitmap, measured) else db.addImage(imageName, bitmap)
         } catch (e: ImageInsufficientQualityException) {
             notice("Not enough detail in that photo. Try a sign with text or a picture")
+            debug?.event("photo_rejected", "leg" to index, "size" to "${bitmap.width}x${bitmap.height}", "measured_m" to measured)
             return
         }
+        debug?.event("photo", "leg" to index, "size" to "${bitmap.width}x${bitmap.height}", "measured_m" to measured, "for" to s.reason.javaClass.simpleName.lowercase())
+        debug?.show("measured", measured)
         session.configure(session.config.apply { augmentedImageDatabase = db })
         val photo = "leg$index.jpg"
         saveJpeg(bitmap, File(store.draft, photo))
@@ -197,9 +210,13 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
                 it.trackingMethod == AugmentedImage.TrackingMethod.FULL_TRACKING
         }
         if (image == null) {
-            if (!s.slow && SystemClock.elapsedRealtime() - lockStartedAt > SLOW_LOCK_MS) stage = s.copy(slow = true)
+            if (!s.slow && SystemClock.elapsedRealtime() - lockStartedAt > SLOW_LOCK_MS) {
+                stage = s.copy(slow = true)
+                debug?.event("lock_slow", "seen_frames" to lockFrames)
+            }
             return null
         }
+        if (lockFrames == 0) debug?.event("photo_seen", "after_ms" to SystemClock.elapsedRealtime() - lockStartedAt)
         if (++lockFrames < (if (pendingMeasured) LOCK_FRAMES_MEASURED else LOCK_FRAMES)) return null
 
         val pose = levelled(image.centerPose)
@@ -218,12 +235,28 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             previous.anchor.detach()
         }
         current = LegDraft(pendingPhoto!!, image.extentX.takeIf { it > 0f && it.isFinite() } ?: 0f, entry, anchor)
+        debug?.event(
+            "locked",
+            "leg" to legs.size,
+            "after_ms" to SystemClock.elapsedRealtime() - lockStartedAt,
+            "measured" to pendingMeasured,
+            "width_m" to image.extentX,
+            "entry" to entry.javaClass.simpleName.lowercase(),
+            "offset" to (entry as? LegEntry.Checkpoint)?.fromPrevious?.let { "%.2f,%.2f,%.2f,%.1fdeg".format(java.util.Locale.US, it.x, it.y, it.z, Math.toDegrees(it.yaw.toDouble())) },
+        )
         stage = RecordStage.Walking
         hint = null
         return null
     }
 
     private fun publish(frameHint: String?) {
+        debug?.let { d ->
+            d.show("stage", stage.javaClass.simpleName.lowercase())
+            d.show("legs", legs.size + (if (current != null) 1 else 0))
+            d.show("points", current?.points?.size ?: 0)
+            d.show("meters", walkedMeters())
+            if (stage is RecordStage.Locking) d.show("lock_frames", lockFrames)
+        }
         val photos = legs.size + (if (current != null) 1 else 0) + (if (stage is RecordStage.Locking) 1 else 0)
         val next = RecordUi(
             stage = stage,

@@ -11,6 +11,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -40,6 +41,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -56,6 +58,7 @@ class HomeActivity : ComponentActivity() {
 
     private val store by lazy { RouteStore(File(filesDir, "routes")) }
     private val routes = mutableStateOf<List<Route>>(emptyList())
+    private val debugLogs = mutableStateOf<Int?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -80,6 +83,13 @@ class HomeActivity : ComponentActivity() {
                         store.delete(it)
                         refresh()
                     },
+                    debugLogs = debugLogs.value,
+                    onToggleDebug = ::toggleDebug,
+                    onShareLogs = ::shareLogs,
+                    onClearLogs = {
+                        DebugLog.clear(this)
+                        refresh()
+                    },
                 )
             }
         }
@@ -99,6 +109,36 @@ class HomeActivity : ComponentActivity() {
     private fun refresh() {
         lifecycleScope.launch {
             routes.value = withContext(Dispatchers.IO) { store.list() }
+            debugLogs.value = if (DebugLog.isEnabled(this@HomeActivity)) {
+                withContext(Dispatchers.IO) { DebugLog.logs(this@HomeActivity).size }
+            } else {
+                null
+            }
+        }
+    }
+
+    /** Hidden switch: long-press the title. */
+    private fun toggleDebug() {
+        val on = !DebugLog.isEnabled(this)
+        DebugLog.setEnabled(this, on)
+        Toast.makeText(this, if (on) "Debug mode on" else "Debug mode off", Toast.LENGTH_SHORT).show()
+        refresh()
+    }
+
+    private fun shareLogs() {
+        lifecycleScope.launch {
+            val file = withContext(Dispatchers.IO) {
+                File(cacheDir, "share/path-tracer-logs.zip").also {
+                    File(cacheDir, "share").deleteRecursively()
+                    DebugLog.zipAll(this@HomeActivity, it)
+                }
+            }
+            val uri = FileProvider.getUriForFile(this@HomeActivity, "$packageName.files", file)
+            val send = Intent(Intent.ACTION_SEND)
+                .setType("application/zip")
+                .putExtra(Intent.EXTRA_STREAM, uri)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            startActivity(Intent.createChooser(send, "Share debug logs"))
         }
     }
 
@@ -168,6 +208,11 @@ private fun Home(
     onShare: (Route) -> Unit,
     onRename: (Route, String) -> Unit,
     onDelete: (Route) -> Unit,
+    /** Number of saved logs while debug mode is on, else null. */
+    debugLogs: Int?,
+    onToggleDebug: () -> Unit,
+    onShareLogs: () -> Unit,
+    onClearLogs: () -> Unit,
 ) {
     var renaming by remember { mutableStateOf<Route?>(null) }
     var deleting by remember { mutableStateOf<Route?>(null) }
@@ -178,7 +223,10 @@ private fun Home(
     ) {
         item {
             Column(Modifier.padding(top = 24.dp, bottom = 8.dp)) {
-                Text("Path Tracer", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    "Path Tracer", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.pointerInput(Unit) { detectTapGestures(onLongPress = { onToggleDebug() }) },
+                )
                 Spacer(Modifier.size(6.dp))
                 Text(
                     "Record the way to a room inside a big building, share it, and friends follow it in AR.",
@@ -211,6 +259,24 @@ private fun Home(
         }
         items(routes, key = { it.id }) { route ->
             RouteCard(route, photoOf(route), onFollow, onShare, { renaming = route }, { deleting = route })
+        }
+        if (debugLogs != null) {
+            item {
+                Column(
+                    Modifier.fillMaxWidth().background(Warn.copy(alpha = 0.12f), RoundedCornerShape(18.dp)).padding(14.dp),
+                ) {
+                    Text("Debug mode is on", color = Warn, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "AR screens show live numbers and save a log. $debugLogs saved. Long-press the title to turn it off.",
+                        color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp,
+                    )
+                    Spacer(Modifier.size(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onShareLogs, enabled = debugLogs > 0) { Text("Share logs") }
+                        TextButton(onClick = onClearLogs, enabled = debugLogs > 0) { Text("Clear") }
+                    }
+                }
+            }
         }
         item { Spacer(Modifier.size(24.dp)) }
     }

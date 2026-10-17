@@ -67,6 +67,9 @@ class RouteFollower(route: Route) : ArRenderer() {
     private var speechId = 0
     /** Stretch, maneuver and kind of the instruction last spoken, so each is said once. */
     private var spokenFor: Triple<Int, Int, Instruction.Kind>? = null
+    private var searchStartedAt = SystemClock.elapsedRealtime()
+    private var lastSample = 0L
+    private var wasOffRoute = false
 
     init {
         say("Go to the entrance and point your camera at the sign in the photo")
@@ -80,6 +83,7 @@ class RouteFollower(route: Route) : ArRenderer() {
     /** The follower says they're out of the elevator already: wait for the next photo. */
     fun skip() = post {
         if (stage == FollowStage.Guiding && !navigator.isLastStretch) {
+            debug?.event("skip_pressed", "stretch" to navigator.stretch)
             navigator.skip()
             searchNext()
         }
@@ -132,6 +136,18 @@ class RouteFollower(route: Route) : ArRenderer() {
 
             val moving = stretchIndex != navigator.stretch || stage != FollowStage.Guiding
             if (!moving && !movedEnough(world)) continue
+            debug?.let { d ->
+                if (stage != FollowStage.Guiding) {
+                    d.event("found", "leg" to leg, "stretch" to stretchIndex, "after_ms" to SystemClock.elapsedRealtime() - searchStartedAt)
+                } else {
+                    // How far the route moves when a photo puts it back in place: the drift so far.
+                    val was = anchor?.pose
+                    val drift = was?.let { hypot(hypot(world.tx() - it.tx(), world.ty() - it.ty()), world.tz() - it.tz()) }
+                    val turn = was?.let { Math.toDegrees((world.toYawPose().yaw - it.toYawPose().yaw).toDouble()) }
+                    d.event("snap", "leg" to leg, "stretch" to stretchIndex, "drift_m" to drift, "turn_deg" to turn)
+                    d.show("last_drift", drift)
+                }
+            }
             navigator.lockOn(leg)
             if (moving) spokenFor = null
             stage = FollowStage.Guiding
@@ -201,6 +217,7 @@ class RouteFollower(route: Route) : ArRenderer() {
         if (navigator.atStretchEnd(g)) {
             if (navigator.isLastStretch) {
                 stage = FollowStage.Arrived
+                debug?.event("arrived", "remaining_m" to g.remaining)
                 say("You've arrived")
             } else {
                 navigator.skip()
@@ -212,6 +229,8 @@ class RouteFollower(route: Route) : ArRenderer() {
 
     /** After reaching an elevator: wait for the photo that starts the next stretch. */
     private fun searchNext() {
+        debug?.event("search", "stretch" to navigator.stretch)
+        searchStartedAt = SystemClock.elapsedRealtime()
         stage = FollowStage.Searching(navigator.stretch)
         dropAnchor()
         val floor = (navigator.stretches[navigator.stretch].entry as? LegEntry.Elevator)?.floor.orEmpty()
@@ -222,6 +241,7 @@ class RouteFollower(route: Route) : ArRenderer() {
     }
 
     private fun say(text: String) {
+        debug?.event("say", "text" to text)
         speech = text
         speechId++
     }
@@ -246,7 +266,33 @@ class RouteFollower(route: Route) : ArRenderer() {
         return bearing.takeIf { abs(it) > ARROW_ANGLE }
     }
 
+    private fun trace(g: Guidance?, arrow: Float?) {
+        val d = debug ?: return
+        d.show("stage", stage.javaClass.simpleName.lowercase())
+        d.show("stretch", "${navigator.stretch + 1}/${navigator.stretches.size}")
+        d.show("depth", if (!useDepth) "off" else if (depth.ready) "on" else "waiting")
+        d.show("anchor", anchor?.trackingState?.name?.lowercase())
+        if (g == null) return
+        d.show("progress", g.progress)
+        d.show("offset", g.offset)
+        d.show("remaining", g.remaining)
+        d.show("arrow", arrow?.let { Math.toDegrees(it.toDouble()).toInt() })
+        if (g.offRoute != wasOffRoute) {
+            d.event(if (g.offRoute) "off_route" else "back_on_route", "offset_m" to g.offset, "progress" to g.progress)
+            wasOffRoute = g.offRoute
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastSample >= SAMPLE_MS) {
+            lastSample = now
+            d.event(
+                "sample", "stretch" to navigator.stretch, "progress" to g.progress, "offset" to g.offset,
+                "remaining" to g.remaining, "next" to g.instruction.title, "in_m" to g.maneuverDistance,
+            )
+        }
+    }
+
     private fun publish(hint: String?, g: Guidance?, arrow: Float?) {
+        trace(g, arrow)
         val stage = stage
         val previous = _state.value
         val next = FollowUi(
@@ -271,6 +317,7 @@ class RouteFollower(route: Route) : ArRenderer() {
         const val BEHIND = 0.6f
         const val BUZZ_DISTANCE = 3f
         const val SKIP_WITHIN = 10f
+        const val SAMPLE_MS = 1000L
         const val SNAP_EVERY_FRAMES = 15
         const val SNAP_METERS = 0.04f
         const val SNAP_RADIANS = 0.03f
