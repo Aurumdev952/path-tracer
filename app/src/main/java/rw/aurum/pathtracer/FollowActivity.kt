@@ -78,6 +78,11 @@ class FollowActivity : ArActivity() {
             finish()
             return
         }
+        debug?.event(
+            "route", "id" to route.id, "name" to route.name, "legs" to route.legs.size,
+            "stretches" to stretches.size, "meters" to route.lengthMeters,
+            "photo_widths" to route.legs.joinToString(",") { "%.2f".format(Locale.US, it.photoWidth) },
+        )
         voice.value = getPreferences(MODE_PRIVATE).getBoolean(PREF_VOICE, true)
         tts = TextToSpeech(this) { status ->
             if (status != TextToSpeech.SUCCESS) return@TextToSpeech
@@ -102,11 +107,13 @@ class FollowActivity : ArActivity() {
 
     private fun toggleVoice() {
         voice.value = !voice.value
+        debug?.event("voice", "on" to voice.value)
         getPreferences(MODE_PRIVATE).edit().putBoolean(PREF_VOICE, voice.value).apply()
         if (!voice.value) tts?.stop()
     }
 
     override fun configure(session: Session, config: Config) {
+        debug?.event("depth_supported", "value" to session.isDepthModeSupported(Config.DepthMode.AUTOMATIC))
         if (session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
             config.depthMode = Config.DepthMode.AUTOMATIC
             follower.useDepth = true
