@@ -3,6 +3,7 @@ package rw.aurum.pathtracer
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.PI
@@ -234,6 +235,39 @@ class GuideTest {
         for (p in downstairs.filterIndexed { i, _ -> i % 10 == 0 } + downstairs.last()) g = nav.update(p)
         assertTrue(nav.atStretchEnd(g))
         assertEquals("You've arrived", g.instruction.title)
+    }
+
+    /** A 1 m sign 2 m in front of a camera at the origin looking down -z, turned [deg] about the vertical. */
+    private fun signRays(deg: Double): List<FloatArray> {
+        val a = Math.toRadians(deg)
+        val along = floatArrayOf(kotlin.math.cos(a).toFloat(), 0f, -kotlin.math.sin(a).toFloat())
+        val center = floatArrayOf(0f, 0f, -2f)
+        val left = FloatArray(3) { center[it] - 0.5f * along[it] }
+        val right = FloatArray(3) { center[it] + 0.5f * along[it] }
+        val normal = floatArrayOf(kotlin.math.sin(a).toFloat(), 0f, kotlin.math.cos(a).toFloat())
+        return listOf(left, right, center, normal)
+    }
+
+    @Test fun measuresASignSeenAtAnAngle() {
+        val origin = floatArrayOf(0f, 0f, 0f)
+        for (deg in listOf(0.0, 25.0, 40.0, 60.0)) {
+            val (left, right, center, normal) = signRays(deg)
+            val width = spanOnPlane(origin, left, origin, right, center, normal)
+            assertEquals("at $deg degrees", 1f, width!!, 0.001f)
+        }
+        // Assuming the sign faces the camera, the same view reads 23% narrow at 40 degrees.
+        val (left, right) = signRays(40.0)
+        val straightOn = spanOnPlane(origin, left, origin, right, floatArrayOf(0f, 0f, -2f), floatArrayOf(0f, 0f, 1f))!!
+        assertEquals(0.77f, straightOn, 0.02f)
+    }
+
+    @Test fun refusesGrazingOrBackwardPlanes() {
+        val origin = floatArrayOf(0f, 0f, 0f)
+        val ahead = floatArrayOf(0f, 0f, -1f)
+        // A plane seen almost edge on.
+        assertNull(spanOnPlane(origin, ahead, origin, ahead, floatArrayOf(0f, 0f, -2f), floatArrayOf(1f, 0f, 0.1f)))
+        // A plane behind the camera.
+        assertNull(spanOnPlane(origin, ahead, origin, ahead, floatArrayOf(0f, 0f, 2f), floatArrayOf(0f, 0f, 1f)))
     }
 
     @Test fun formatsDistances() {

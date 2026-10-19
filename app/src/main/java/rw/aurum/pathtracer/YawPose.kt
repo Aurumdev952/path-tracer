@@ -33,3 +33,26 @@ data class YawPose(val x: Float, val y: Float, val z: Float, val yaw: Float) {
         val Identity = YawPose(0f, 0f, 0f, 0f)
     }
 }
+
+/**
+ * Where two rays (origin [oa] or [ob], direction [da] or [db]) cross the plane through [p] with
+ * normal [n], and how far apart those points are. Null if either ray runs nearly along the plane
+ * (more than about 75 degrees off its normal) or meets it behind its origin.
+ */
+fun spanOnPlane(oa: FloatArray, da: FloatArray, ob: FloatArray, db: FloatArray, p: FloatArray, n: FloatArray): Float? {
+    fun dot(u: FloatArray, v: FloatArray) = u[0] * v[0] + u[1] * v[1] + u[2] * v[2]
+    fun len(u: FloatArray) = kotlin.math.sqrt(dot(u, u))
+    fun hit(o: FloatArray, d: FloatArray): FloatArray? {
+        val along = dot(d, n)
+        if (kotlin.math.abs(along) < GRAZING * len(d) * len(n)) return null
+        val t = (dot(p, n) - dot(o, n)) / along
+        if (t <= 0f) return null
+        return floatArrayOf(o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t)
+    }
+    val a = hit(oa, da) ?: return null
+    val b = hit(ob, db) ?: return null
+    return len(floatArrayOf(a[0] - b[0], a[1] - b[1], a[2] - b[2]))
+}
+
+/** cos(75 degrees): rays closer to the plane than this give unreliable widths. */
+private const val GRAZING = 0.26f
