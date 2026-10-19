@@ -58,16 +58,17 @@ class FloorTracker {
 /**
  * Keeps a route frame going when ARCore stops tracking its anchor while the camera still tracks,
  * which happens when walking into a new area: without this, nothing more gets recorded or drawn.
- * It remembers where the camera was in the frame, and after a second without the anchor it puts a
- * new anchor where the frame must be, assuming the user hasn't moved or turned since.
+ * It remembers where the anchor last was, and after a second without it, while the camera still
+ * tracks, puts a new anchor there. The camera's own tracking carries any walking or turning done
+ * meanwhile; placing the anchor relative to the camera instead would drag the route along.
  */
 class AnchorKeeper(private val onEvent: (String, Array<Pair<String, Any?>>) -> Unit = { _, _ -> }) {
-    private var cameraInFrame: Pose? = null
+    private var lastPose: Pose? = null
     private var lostSince = 0L
     private var lastState: TrackingState? = null
 
     fun reset() {
-        cameraInFrame = null
+        lastPose = null
         lostSince = 0L
         lastState = null
     }
@@ -81,18 +82,17 @@ class AnchorKeeper(private val onEvent: (String, Array<Pair<String, Any?>>) -> U
         }
         if (camera.trackingState != TrackingState.TRACKING) return null
         if (state == TrackingState.TRACKING) {
-            cameraInFrame = anchor.pose.inverse().compose(camera.pose)
+            lastPose = anchor.pose
             lostSince = 0L
             return null
         }
-        val inFrame = cameraInFrame ?: return null
+        val pose = lastPose ?: return null
         if (lostSince == 0L) lostSince = now
         if (now - lostSince < REANCHOR_AFTER_MS) return null
-        val frame = levelled(camera.pose.compose(inFrame.inverse()))
         onEvent("reanchored", arrayOf("lost_ms" to now - lostSince, "was" to state.name.lowercase()))
         lostSince = 0L
         lastState = null
-        return session.createAnchor(frame)
+        return session.createAnchor(pose)
     }
 
     private companion object {
