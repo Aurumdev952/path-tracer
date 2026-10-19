@@ -36,7 +36,11 @@ class Path(val points: List<TrailPoint>) {
         return out
     }
 
-    data class Fix(val s: Float, val offset: Float, val nearest: TrailPoint)
+    /**
+     * [offset] is the distance from the path, counting height beyond [HEIGHT_SLACK] so another
+     * floor is far away. [above] is how much higher the point is than the path there.
+     */
+    data class Fix(val s: Float, val offset: Float, val nearest: TrailPoint, val above: Float = 0f)
 
     /**
      * Finds where [p] is along the path. It looks around [near] first (a little behind, more
@@ -44,7 +48,10 @@ class Path(val points: List<TrailPoint>) {
      * path when [p] is far from that window.
      */
     fun locate(p: TrailPoint, near: Float): Fix {
-        if (points.size < 2) return Fix(0f, points.firstOrNull()?.distanceTo(p) ?: 0f, points.firstOrNull() ?: p)
+        if (points.size < 2) {
+            val only = points.firstOrNull() ?: return Fix(0f, 0f, p)
+            return Fix(0f, offset(p, only), only, p.y - only.y)
+        }
         val local = nearest(p, near - LOCATE_BEHIND, near + LOCATE_AHEAD)
         if (local.offset <= LOCATE_REACH) return local
         val global = nearest(p, 0f, length)
@@ -62,11 +69,15 @@ class Path(val points: List<TrailPoint>) {
             val len2 = dx * dx + dz * dz
             val t = if (len2 < 1e-8f) 0f else (((p.x - a.x) * dx + (p.z - a.z) * dz) / len2).coerceIn(0f, 1f)
             val q = TrailPoint(a.x + dx * t, a.y + (b.y - a.y) * t, a.z + dz * t)
-            val d = q.distanceTo(p)
-            if (d < best.offset) best = Fix(cum[i] + (cum[i + 1] - cum[i]) * t, d, q)
+            val d = offset(p, q)
+            if (d < best.offset) best = Fix(cum[i] + (cum[i + 1] - cum[i]) * t, d, q, p.y - q.y)
         }
         return best
     }
+
+    /** Distance on the floor, plus any height difference bigger than floor estimates disagree by. */
+    private fun offset(p: TrailPoint, q: TrailPoint): Float =
+        hypot(q.distanceTo(p), (abs(p.y - q.y) - HEIGHT_SLACK).coerceAtLeast(0f))
 
     private fun segmentAt(s: Float): Int {
         var lo = 0
@@ -82,6 +93,8 @@ class Path(val points: List<TrailPoint>) {
         const val LOCATE_BEHIND = 4f
         const val LOCATE_AHEAD = 20f
         const val LOCATE_REACH = 3f
+        /** The recorder's and follower's floor heights can differ by about this much on one floor. */
+        const val HEIGHT_SLACK = 1f
     }
 }
 
@@ -313,12 +326,17 @@ class Navigator(val route: Route) {
         val path = current.path
         val fix = path.locate(position, progress)
         progress = fix.s
-        val offRoute = fix.offset > OFF_ROUTE
+        val offRoute = fix.offset > OFF_ROUTE || abs(fix.above) > WRONG_FLOOR
         val list = maneuvers[stretch]
         val key = list.indexOfFirst { it.s > progress - PASSED }.let { if (it < 0) list.lastIndex else it }
         val next = list[key]
         val distance = (next.s - progress).coerceAtLeast(0f)
         val instruction = when {
+            abs(fix.above) > WRONG_FLOOR -> Instruction(
+                Instruction.Kind.OffRoute,
+                "Go ${if (fix.above > 0) "down" else "up"} " + floorsIn(fix.above).coerceAtLeast(1).let { if (it == 1) "a floor" else "$it floors" },
+                "The path is on another floor",
+            )
             offRoute -> Instruction(Instruction.Kind.OffRoute, "Back to the path", "${meters(fix.offset)} away")
             distance > STRAIGHT_UNTIL -> Instruction(Instruction.Kind.Straight, "Go straight", "for ${meters(distance)}")
             else -> next.instruction(distance, stretches.getOrNull(stretch + 1))
@@ -348,6 +366,8 @@ class Navigator(val route: Route) {
         const val OFF_ROUTE = 2.5f
         const val END_RADIUS = 1.5f
         const val ARROW_LEAD = 2f
+        /** More height than this between the follower and the path means another floor. */
+        const val WRONG_FLOOR = 1.8f
         private const val PASSED = 0.5f
         private const val STRAIGHT_UNTIL = 15f
     }

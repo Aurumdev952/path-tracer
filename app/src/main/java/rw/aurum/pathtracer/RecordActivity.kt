@@ -242,14 +242,14 @@ private fun RecordOverlay(
             onFinish(it)
         },
     )
-    val guess = ui.askFloor
-    if (guess != null && stage is RecordStage.Capture) {
+    val question = ui.askFloor
+    if (question != null && stage is RecordStage.Capture) {
         NameDialog(
             title = "Which floor are you on?",
-            initial = guess,
+            initial = question.guess,
             confirm = "OK",
-            label = "Guessed from the elevator ride",
-            onDismiss = { onConfirmFloor(guess) },
+            label = "You rode ${question.ride}",
+            onDismiss = { onConfirmFloor(question.guess) },
             onConfirm = onConfirmFloor,
         )
     }

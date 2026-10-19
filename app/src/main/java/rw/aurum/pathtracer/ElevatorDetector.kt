@@ -186,9 +186,15 @@ fun floorLabel(n: Int): String = when {
     else -> n.toString()
 }
 
-/** The floor reached after rising [rise] meters from [from] (assumed ground floor if unknown). */
-fun guessFloor(from: String, rise: Float): String =
-    floorLabel((floorNumber(from) ?: 0) + (rise / FLOOR_HEIGHT_M).roundToInt())
+/** The floor reached after rising [rise] meters from floor [from], or null if [from] isn't a floor number. */
+fun guessFloor(from: String, rise: Float): String? =
+    floorNumber(from)?.let { floorLabel(it + (rise / FLOOR_HEIGHT_M).roundToInt()) }
+
+/** "about 10 floors down", for when the floor can't be named. */
+fun rideSummary(rise: Float): String {
+    val n = floorsIn(rise).coerceAtLeast(1)
+    return "about ${if (n == 1) "1 floor" else "$n floors"} ${if (rise < 0) "down" else "up"}"
+}
 
 /** Whole floors in [rise] meters, for messages like "up 14 floors". */
 fun floorsIn(rise: Float): Int = (abs(rise) / FLOOR_HEIGHT_M).roundToInt()
@@ -228,4 +234,3 @@ fun rideMessage(check: RideCheck, floor: String): String {
 
 private fun floors(n: Int) = if (n == 1) "1 floor" else "$n floors"
 
-fun rideSummary(rise: Float): String = TODO()
