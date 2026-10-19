@@ -14,6 +14,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
 import java.util.UUID
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.hypot
+import kotlin.math.sin
 
 /** Why the recorder is asking for a photo. */
 sealed interface PhotoFor {
@@ -74,6 +78,9 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         val steps = mutableListOf<Step>()
         var meters = 0f
         var nudged = false
+        /** Where the anchor was made, to log how far ARCore's corrections move it as the walk goes on. */
+        val madeAt: YawPose = anchor.pose.toYawPose()
+        var loggedAt = 0L
         fun toLeg() = Leg(photo, width, entry, points.toList(), steps.toList())
 
         /** Drops points recorded at or after [t], keeping at least the first. */
@@ -264,6 +271,20 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
                 leg.nudged = true
                 notice("Good spot for a checkpoint. Tap Checkpoint and photograph a sign nearby", NUDGE_MS)
                 debug?.event("checkpoint_nudge", "leg_m" to leg.meters)
+            }
+
+            debug?.let { d ->
+                val now = SystemClock.elapsedRealtime()
+                if (now - leg.loggedAt >= ANCHOR_LOG_MS) {
+                    leg.loggedAt = now
+                    val p = leg.anchor.pose.toYawPose()
+                    val m = leg.madeAt
+                    val turn = Math.toDegrees(atan2(sin(p.yaw - m.yaw), cos(p.yaw - m.yaw)).toDouble())
+                    d.event(
+                        "anchor_moved", "leg_m" to leg.meters, "m" to hypot(hypot(p.x - m.x, p.y - m.y), p.z - m.z),
+                        "deg" to turn, "from_anchor_m" to hypot(head.x, head.z),
+                    )
+                }
             }
 
             camera.getViewMatrix(view, 0)
@@ -563,5 +584,6 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         const val CHECKPOINT_NUDGE_METERS = 40f
         const val CHECK_EVERY = 6L
         const val OUTLINE_MS = 1500L
+        const val ANCHOR_LOG_MS = 3000L
     }
 }
