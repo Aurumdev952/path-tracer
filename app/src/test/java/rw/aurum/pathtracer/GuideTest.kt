@@ -188,6 +188,50 @@ class GuideTest {
         )
     }
 
+    /** Points every 12 cm along straight lines through [corners] (x, y, z). */
+    private fun walk3(vararg corners: Triple<Float, Float, Float>): List<TrailPoint> {
+        val out = mutableListOf(TrailPoint(corners[0].first, corners[0].second, corners[0].third))
+        for (i in 1 until corners.size) {
+            val (ax, ay, az) = corners[i - 1]
+            val (bx, by, bz) = corners[i]
+            val n = (kotlin.math.hypot(bx - ax, bz - az) / 0.12f).toInt().coerceAtLeast(1)
+            for (k in 1..n) out += TrailPoint(ax + (bx - ax) * k / n, ay + (by - ay) * k / n, az + (bz - az) * k / n)
+        }
+        return out
+    }
+
+    // Along a corridor, down a flight of stairs (4 m lower), and back under the corridor, 1.5 m to the side.
+    private val downstairs = walk3(
+        Triple(0f, 0f, 0f), Triple(0f, 0f, -20f), Triple(1.5f, -4f, -26f), Triple(1.5f, -4f, -6f),
+    )
+
+    @Test fun theFloorAboveTheEndIsNotTheEnd() {
+        val nav = Navigator(route(leg(downstairs)))
+        // The follower walks the same way seen from above, but never takes the stairs.
+        var g = nav.update(TrailPoint(0f, 0f, 0f))
+        for (z in 0 downTo -20) g = nav.update(TrailPoint(0f, 0f, z.toFloat()))
+        for (z in -20..-6) g = nav.update(TrailPoint(1.5f, 0f, z.toFloat()))
+
+        assertFalse(nav.atStretchEnd(g))
+        assertTrue(g.offRoute)
+        assertEquals("Go down a floor", g.instruction.title)
+    }
+
+    @Test fun findsTheFollowerOnTheirOwnFloorWhereTheRoutePassesTwice() {
+        val path = Path(downstairs)
+        // Downstairs, under the start of the corridor: the lower pass, not the corridor overhead.
+        val fix = path.locate(TrailPoint(1.5f, -4f, -10f), near = 0f)
+        assertTrue("located at ${fix.s}", fix.s > 26f)
+    }
+
+    @Test fun arrivesDownstairs() {
+        val nav = Navigator(route(leg(downstairs)))
+        var g = nav.update(TrailPoint(0f, 0f, 0f))
+        for (p in downstairs.filterIndexed { i, _ -> i % 10 == 0 } + downstairs.last()) g = nav.update(p)
+        assertTrue(nav.atStretchEnd(g))
+        assertEquals("You've arrived", g.instruction.title)
+    }
+
     @Test fun formatsDistances() {
         assertEquals("4 m", meters(4.1f))
         assertEquals("4.5 m", meters(4.4f))

@@ -227,3 +227,5 @@ fun rideMessage(check: RideCheck, floor: String): String {
 }
 
 private fun floors(n: Int) = if (n == 1) "1 floor" else "$n floors"
+
+fun rideSummary(rise: Float): String = TODO()
