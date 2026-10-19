@@ -123,6 +123,8 @@ class RouteFollower(route: Route) : ArRenderer() {
         if (camera.trackingState == TrackingState.TRACKING) {
             elevator.position(SystemClock.elapsedRealtime(), camera.pose.tx(), camera.pose.tz())
         }
+        elevator.stepsKnown = stepsKnown
+        takeSteps(elevator::step)
         takeAltitudes { t, m -> elevator.altitude(t, m)?.let(::onElevator) }
         debug?.show("baro_m", elevator.altitude)
 
