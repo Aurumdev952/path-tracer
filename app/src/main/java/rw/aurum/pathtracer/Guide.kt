@@ -272,6 +272,8 @@ data class Guidance(
     val progress: Float,
     /** Meters from the follower to the nearest point of the path. */
     val offset: Float,
+    /** How much higher the follower is than the path there, in meters. */
+    val above: Float,
     val offRoute: Boolean,
     val instruction: Instruction,
     /** Where the on-screen arrow should point, in the stretch frame. */
@@ -346,6 +348,7 @@ class Navigator(val route: Route) {
         return Guidance(
             progress = progress,
             offset = fix.offset,
+            above = fix.above,
             offRoute = offRoute,
             instruction = instruction,
             target = if (offRoute) fix.nearest else path.pointAt(progress + ARROW_LEAD),

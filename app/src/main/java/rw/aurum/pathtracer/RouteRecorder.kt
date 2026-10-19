@@ -59,7 +59,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     private val _state = MutableStateFlow(RecordUi())
     val state: StateFlow<RecordUi> = _state
 
-    private class LegDraft(val photo: String, val width: Float, val entry: LegEntry, val anchor: Anchor) {
+    private class LegDraft(val photo: String, val width: Float, val entry: LegEntry, var anchor: Anchor) {
         val points = mutableListOf<TrailPoint>()
         /** When each point was recorded, to drop the ones taken inside an elevator. */
         val times = mutableListOf<Long>()
@@ -86,10 +86,9 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     /** The leg being walked. During a checkpoint photo the previous leg keeps recording. */
     private var current: LegDraft? = null
     private var captureRequested = false
+    private var measureTries = 0
     private var pendingImage: String? = null
     private var pendingPhoto: String? = null
-    /** The pending photo's size was measured, so ARCore needs no extra looks to place it. */
-    private var pendingMeasured = false
     private var attempts = 0
     private var lockFrames = 0
     private var lockStartedAt = 0L
@@ -98,6 +97,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     private var floor = ""
 
     private val elevator = ElevatorDetector()
+    private val keeper = AnchorKeeper { name, fields -> debug?.event(name, *fields) }
     /** The leg that was being walked when an elevator ride was noticed, until the ride is confirmed. */
     private var ridingFrom: LegDraft? = null
     private var rideStartedAt = 0L
@@ -216,6 +216,12 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         if (tracking && s is RecordStage.Locking) frameHint = frameHint ?: lockOn(session, s)
 
         val leg = current
+        if (leg != null) {
+            keeper.check(session, camera, leg.anchor, SystemClock.elapsedRealtime())?.let { replacement ->
+                leg.anchor.detach()
+                leg.anchor = replacement
+            }
+        }
         if (tracking && leg != null && leg.anchor.trackingState == TrackingState.TRACKING) {
             val cam = camera.pose
             val local = leg.anchor.pose.inverse()
@@ -290,34 +296,53 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
 
     private fun resumeAfterFalseRide(why: String) {
         debug?.event("ride_false", "by" to why)
+        keeper.reset()
         current = ridingFrom
         ridingFrom = null
         stage = RecordStage.Walking
     }
 
+    /**
+     * Takes the sign photo once its real size is known. ARCore never locked on to a photo of
+     * unknown size in field tests, so without a size there is no photo: measuring is retried for
+     * about a second, then the user is asked to step closer.
+     */
     private fun capture(session: Session, frame: Frame) {
         val s = stage as? RecordStage.Capture ?: return
+        val size = SignPhoto.measure(frame, width, height)
+        if (size == null) {
+            if (++measureTries < MEASURE_TRIES) return
+            captureRequested = false
+            measureTries = 0
+            notice("Couldn't tell how far away the sign is. Step a little closer, hold still and try again")
+            debug?.event("photo_unmeasured", "why" to SignPhoto.lastFailure)
+            return
+        }
         val bitmap = SignPhoto.capture(frame, width, height) ?: return
         captureRequested = false
+        val measureFrames = measureTries
+        measureTries = 0
         val db = database ?: AugmentedImageDatabase(session).also { database = it }
         val index = legs.size + if (current != null) 1 else 0
         val imageName = "leg${index}_${attempts++}"
-        val measured = SignPhoto.measureWidth(frame, width, height)
+        val measured = size.width
         try {
-            if (measured != null) db.addImage(imageName, bitmap, measured) else db.addImage(imageName, bitmap)
+            db.addImage(imageName, bitmap, measured)
         } catch (e: ImageInsufficientQualityException) {
             notice("Not enough detail in that photo. Try a sign with text or a picture")
             debug?.event("photo_rejected", "leg" to index, "size" to "${bitmap.width}x${bitmap.height}", "measured_m" to measured)
             return
         }
-        debug?.event("photo", "leg" to index, "size" to "${bitmap.width}x${bitmap.height}", "measured_m" to measured, "for" to s.reason.javaClass.simpleName.lowercase())
+        debug?.event(
+            "photo", "leg" to index, "size" to "${bitmap.width}x${bitmap.height}", "measured_m" to measured,
+            "how" to size.how, "after_frames" to measureFrames, "for" to s.reason.javaClass.simpleName.lowercase(),
+        )
         debug?.show("measured", measured)
         session.configure(session.config.apply { augmentedImageDatabase = db })
         val photo = "leg$index.jpg"
         saveJpeg(bitmap, File(store.draft, photo))
         pendingImage = imageName
         pendingPhoto = photo
-        pendingMeasured = measured != null
         lockFrames = 0
         lockStartedAt = SystemClock.elapsedRealtime()
         hint = null
@@ -338,7 +363,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             return null
         }
         if (lockFrames == 0) debug?.event("photo_seen", "after_ms" to SystemClock.elapsedRealtime() - lockStartedAt)
-        if (++lockFrames < (if (pendingMeasured) LOCK_FRAMES_MEASURED else LOCK_FRAMES)) return null
+        if (++lockFrames < LOCK_FRAMES) return null
 
         val pose = levelled(image.centerPose)
         val anchor = session.createAnchor(pose)
@@ -356,6 +381,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             previous.anchor.detach()
         }
         current = LegDraft(pendingPhoto!!, image.extentX.takeIf { it > 0f && it.isFinite() } ?: 0f, entry, anchor)
+        keeper.reset()
         elevatorRise = 0f
         manualFloor = null
         askFloor = null
@@ -363,7 +389,6 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             "locked",
             "leg" to legs.size,
             "after_ms" to SystemClock.elapsedRealtime() - lockStartedAt,
-            "measured" to pendingMeasured,
             "width_m" to image.extentX,
             "entry" to entry.javaClass.simpleName.lowercase(),
             "offset" to (entry as? LegEntry.Checkpoint)?.fromPrevious?.let { "%.2f,%.2f,%.2f,%.1fdeg".format(java.util.Locale.US, it.x, it.y, it.z, Math.toDegrees(it.yaw.toDouble())) },
@@ -409,8 +434,9 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
 
     private companion object {
         const val STEP_METERS = 0.12f
-        const val LOCK_FRAMES = 20
-        const val LOCK_FRAMES_MEASURED = 6
+        const val LOCK_FRAMES = 6
+        /** About a second of frames to find the sign's size before giving up. */
+        const val MEASURE_TRIES = 30
         /** Points from the last moments before a ride are usually already inside the elevator. */
         const val TRIM_BEFORE_RIDE_MS = 1500L
         const val SLOW_LOCK_MS = 8000L

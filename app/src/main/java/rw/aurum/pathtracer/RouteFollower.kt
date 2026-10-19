@@ -57,6 +57,7 @@ class RouteFollower(route: Route) : ArRenderer() {
     private val depth = DepthTexture()
     private val floorTracker = FloorTracker()
     private val elevator = ElevatorDetector()
+    private val keeper = AnchorKeeper { name, fields -> debug?.event(name, *fields) }
     /** Meters ridden since leaving the last stretch for an elevator. */
     private var riddenRise = 0f
     private var riding = false
@@ -119,6 +120,12 @@ class RouteFollower(route: Route) : ArRenderer() {
 
         if (camera.trackingState == TrackingState.TRACKING && stage != FollowStage.Arrived) {
             snapToPhotos(session, frame)
+            this.anchor?.takeIf { stage == FollowStage.Guiding }?.let { held ->
+                keeper.check(session, camera, held, SystemClock.elapsedRealtime())?.let { replacement ->
+                    held.detach()
+                    anchor = replacement
+                }
+            }
             val anchor = anchor
             if (stage == FollowStage.Guiding && anchor != null) {
                 if (anchor.trackingState == TrackingState.TRACKING) {
@@ -189,6 +196,7 @@ class RouteFollower(route: Route) : ArRenderer() {
     private fun dropAnchor() {
         anchor?.detach()
         anchor = null
+        keeper.reset()
         lastSnap = null
     }
 
@@ -337,7 +345,7 @@ class RouteFollower(route: Route) : ArRenderer() {
         if (now - lastSample >= SAMPLE_MS) {
             lastSample = now
             d.event(
-                "sample", "stretch" to navigator.stretch, "progress" to g.progress, "offset" to g.offset,
+                "sample", "stretch" to navigator.stretch, "progress" to g.progress, "offset" to g.offset, "above" to g.above,
                 "remaining" to g.remaining, "next" to g.instruction.title, "in_m" to g.maneuverDistance,
             )
         }

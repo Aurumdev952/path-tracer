@@ -1,5 +1,6 @@
 package rw.aurum.pathtracer
 
+import com.google.ar.core.Anchor
 import com.google.ar.core.Camera
 import com.google.ar.core.Plane
 import com.google.ar.core.Pose
@@ -51,5 +52,50 @@ class FloorTracker {
         const val MIN_EYE_HEIGHT = 0.7f
         const val MAX_EYE_HEIGHT = 2.2f
         const val TYPICAL_EYE_HEIGHT = 1.4f
+    }
+}
+
+/**
+ * Keeps a route frame going when ARCore stops tracking its anchor while the camera still tracks,
+ * which happens when walking into a new area: without this, nothing more gets recorded or drawn.
+ * It remembers where the camera was in the frame, and after a second without the anchor it puts a
+ * new anchor where the frame must be, assuming the user hasn't moved or turned since.
+ */
+class AnchorKeeper(private val onEvent: (String, Array<Pair<String, Any?>>) -> Unit = { _, _ -> }) {
+    private var cameraInFrame: Pose? = null
+    private var lostSince = 0L
+    private var lastState: TrackingState? = null
+
+    fun reset() {
+        cameraInFrame = null
+        lostSince = 0L
+        lastState = null
+    }
+
+    /** Returns a replacement anchor when [anchor] has been lost long enough, else null. */
+    fun check(session: Session, camera: Camera, anchor: Anchor, now: Long): Anchor? {
+        val state = anchor.trackingState
+        if (state != lastState) {
+            onEvent("anchor", arrayOf("state" to state.name.lowercase()))
+            lastState = state
+        }
+        if (camera.trackingState != TrackingState.TRACKING) return null
+        if (state == TrackingState.TRACKING) {
+            cameraInFrame = anchor.pose.inverse().compose(camera.pose)
+            lostSince = 0L
+            return null
+        }
+        val inFrame = cameraInFrame ?: return null
+        if (lostSince == 0L) lostSince = now
+        if (now - lostSince < REANCHOR_AFTER_MS) return null
+        val frame = levelled(camera.pose.compose(inFrame.inverse()))
+        onEvent("reanchored", arrayOf("lost_ms" to now - lostSince, "was" to state.name.lowercase()))
+        lostSince = 0L
+        lastState = null
+        return session.createAnchor(frame)
+    }
+
+    private companion object {
+        const val REANCHOR_AFTER_MS = 1000L
     }
 }
