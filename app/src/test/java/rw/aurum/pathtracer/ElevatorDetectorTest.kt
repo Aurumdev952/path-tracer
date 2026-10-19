@@ -225,7 +225,7 @@ class ElevatorDetectorTest {
 
         assertEquals(2, events.size)
         assertTrue(events[0].second is ElevatorDetector.Event.RideStarted)
-        assertEquals(ElevatorDetector.Event.RideCancelled, events[1].second)
+        assertEquals(ElevatorDetector.Event.RideCancelled("steps"), events[1].second)
         assertTrue(events[1].first in noticedAt + 1500..noticedAt + 1600)
     }
 
