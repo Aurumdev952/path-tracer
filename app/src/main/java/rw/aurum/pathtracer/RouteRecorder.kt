@@ -27,6 +27,11 @@ sealed interface RecordStage {
     /** Photo taken; waiting for ARCore to find it in the room and measure it. */
     data class Locking(val reason: PhotoFor, val slow: Boolean) : RecordStage
     data object Walking : RecordStage
+    /**
+     * In a moving elevator. [rise] in meters so far, negative going down. [auto] when the
+     * barometer noticed the ride, so the user can say it wasn't one.
+     */
+    data class Riding(val rise: Float, val auto: Boolean) : RecordStage
     data class Saved(val routeId: String) : RecordStage
 }
 
@@ -38,6 +43,8 @@ data class RecordUi(
     val photos: Int = 0,
     val photo: File? = null,
     val floor: String = "",
+    /** After an elevator ride the barometer noticed: the floor it guessed, for the user to confirm. */
+    val askFloor: String? = null,
 )
 
 /**
@@ -51,8 +58,20 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
 
     private class LegDraft(val photo: String, val width: Float, val entry: LegEntry, val anchor: Anchor) {
         val points = mutableListOf<TrailPoint>()
+        /** When each point was recorded, to drop the ones taken inside an elevator. */
+        val times = mutableListOf<Long>()
         val steps = mutableListOf<Step>()
         fun toLeg() = Leg(photo, width, entry, points.toList(), steps.toList())
+
+        /** Drops points recorded at or after [t], keeping at least the first. */
+        fun trimFrom(t: Long) {
+            val keep = times.indexOfFirst { it >= t }.let { if (it < 0) points.size else it.coerceAtLeast(1) }
+            while (points.size > keep) {
+                points.removeAt(points.lastIndex)
+                times.removeAt(times.lastIndex)
+            }
+            steps.removeAll { it.at >= points.size }
+        }
     }
 
     private val trailRenderer = TrailRenderer()
@@ -75,6 +94,18 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     private var hintUntil = 0L
     private var floor = ""
 
+    private val elevator = ElevatorDetector()
+    /** The leg that was being walked when an elevator ride was noticed, until the ride is confirmed. */
+    private var ridingFrom: LegDraft? = null
+    private var rideStartedAt = 0L
+    /** Meters ridden since the last leg ended, over one or more stops of the elevator. */
+    private var elevatorRise = 0f
+    private var askFloor: String? = null
+    /** The floor before the elevator ride, to count floors from. */
+    private var rideBaseFloor = ""
+    /** The floor the user typed with Floor change → Elevator, which beats any guess. */
+    private var manualFloor: String? = null
+
     private val view = FloatArray(16)
     private val projection = FloatArray(16)
     private val model = FloatArray(16)
@@ -95,12 +126,17 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     fun changeFloor(change: FloorChange, floor: String) = post {
         val leg = current ?: return@post
         if (stage != RecordStage.Walking) return@post
+        if (change == FloorChange.Elevator) {
+            rideBaseFloor = this.floor
+            manualFloor = floor.takeIf { it.isNotBlank() }
+        }
         this.floor = floor
         debug?.event("floor_change", "change" to change.name.lowercase(), "floor" to floor, "leg" to legs.size, "points" to leg.points.size)
         if (change == FloorChange.Elevator) {
             legs += leg.toLeg()
             leg.anchor.detach()
             current = null
+            elevatorRise = 0f
             stage = RecordStage.Capture(PhotoFor.Elevator(floor))
         } else {
             leg.steps += Step(leg.points.size.coerceAtLeast(1) - 1, change, floor)
@@ -125,8 +161,23 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         }
     }
 
+    /** The user confirmed or corrected the floor the elevator stopped at. */
+    fun confirmFloor(label: String) = post {
+        askFloor = null
+        floor = label.trim()
+        val s = stage
+        if (s is RecordStage.Capture && s.reason is PhotoFor.Elevator) stage = RecordStage.Capture(PhotoFor.Elevator(floor))
+        debug?.event("floor_confirmed", "floor" to floor)
+    }
+
+    /** It wasn't an elevator: carry on with the leg as if nothing happened. */
+    fun notAnElevator() = post {
+        if ((stage as? RecordStage.Riding)?.auto == true) resumeAfterFalseRide("user")
+    }
+
     fun finish(name: String) = post {
         if (stage is RecordStage.Saved) return@post
+        ridingFrom?.let { endRiddenLeg(it) }
         if (walkedMeters() < MIN_ROUTE_METERS) {
             notice("Walk a few steps first")
             debug?.event("finish_too_short", "meters" to walkedMeters())
@@ -152,6 +203,11 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         val tracking = camera.trackingState == TrackingState.TRACKING
         var frameHint = trackingHint(camera)
 
+        if (tracking) elevator.position(SystemClock.elapsedRealtime(), camera.pose.tx(), camera.pose.tz())
+        takeAltitudes { t, m -> elevator.altitude(t, m)?.let(::onElevator) }
+        if (stage is RecordStage.Riding) stage = (stage as RecordStage.Riding).copy(rise = elevatorRise + elevator.rise)
+        debug?.show("baro_m", elevator.altitude)
+
         if (tracking && captureRequested) capture(session, frame)
         val s = stage
         if (tracking && s is RecordStage.Locking) frameHint = frameHint ?: lockOn(session, s)
@@ -163,7 +219,10 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
                 .transformPoint(floatArrayOf(cam.tx(), floorTracker.floorY(session, camera), cam.tz()))
             val head = TrailPoint(local[0], local[1], local[2])
             val last = leg.points.lastOrNull()
-            if (last == null || head.distanceTo(last) >= STEP_METERS) leg.points += head
+            if (last == null || head.distanceTo(last) >= STEP_METERS) {
+                leg.points += head
+                leg.times += SystemClock.elapsedRealtime()
+            }
 
             camera.getViewMatrix(view, 0)
             camera.getProjectionMatrix(projection, 0, 0.05f, 100f)
@@ -172,6 +231,65 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             trailRenderer.draw(leg.points, head, model, view, projection, seconds)
         }
         publish(frameHint)
+    }
+
+    private fun onElevator(e: ElevatorDetector.Event) {
+        when (e) {
+            is ElevatorDetector.Event.RideStarted -> {
+                debug?.event("ride_start", "up" to e.up, "stage" to stage.javaClass.simpleName.lowercase(), "lag_ms" to SystemClock.elapsedRealtime() - e.startedAt)
+                val s = stage
+                when {
+                    // Walking, or framing a checkpoint photo: the leg ends where the ride began.
+                    current != null && (s == RecordStage.Walking || (s as? RecordStage.Capture)?.reason == PhotoFor.Checkpoint) -> {
+                        ridingFrom = current
+                        rideStartedAt = e.startedAt
+                        current = null
+                        elevatorRise = 0f
+                        rideBaseFloor = floor
+                        manualFloor = null
+                        stage = RecordStage.Riding(0f, auto = true)
+                    }
+                    // Already between legs because of an elevator (tapped, or an earlier stop of this ride).
+                    s is RecordStage.Capture && s.reason is PhotoFor.Elevator -> stage = RecordStage.Riding(elevatorRise, auto = false)
+                }
+                if (stage is RecordStage.Riding) askFloor = null
+            }
+            is ElevatorDetector.Event.RideEnded -> {
+                if (stage !is RecordStage.Riding) return
+                elevatorRise += e.rise
+                ridingFrom?.let { endRiddenLeg(it) }
+                // Keep a floor the user typed; otherwise guess one from the height and ask.
+                val typed = manualFloor
+                val guess = typed ?: guessFloor(rideBaseFloor, elevatorRise)
+                debug?.event("ride_end", "rise_m" to e.rise, "total_m" to elevatorRise, "floors" to floorsIn(elevatorRise), "guess" to guess)
+                if (typed == null) askFloor = guess
+                floor = guess
+                stage = RecordStage.Capture(PhotoFor.Elevator(guess))
+            }
+            ElevatorDetector.Event.RideCancelled -> {
+                debug?.event("ride_cancel")
+                if ((stage as? RecordStage.Riding)?.auto == true && ridingFrom != null) {
+                    resumeAfterFalseRide("detector")
+                } else if (stage is RecordStage.Riding) {
+                    stage = RecordStage.Capture(PhotoFor.Elevator(floor))
+                }
+            }
+        }
+    }
+
+    /** The elevator ride is real: the leg it interrupted ends where the ride began. */
+    private fun endRiddenLeg(leg: LegDraft) {
+        leg.trimFrom(rideStartedAt - TRIM_BEFORE_RIDE_MS)
+        legs += leg.toLeg()
+        leg.anchor.detach()
+        ridingFrom = null
+    }
+
+    private fun resumeAfterFalseRide(why: String) {
+        debug?.event("ride_false", "by" to why)
+        current = ridingFrom
+        ridingFrom = null
+        stage = RecordStage.Walking
     }
 
     private fun capture(session: Session, frame: Frame) {
@@ -224,7 +342,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         val previous = current
         val entry = when (val reason = s.reason) {
             PhotoFor.Start -> LegEntry.Start
-            is PhotoFor.Elevator -> LegEntry.Elevator(reason.floor)
+            is PhotoFor.Elevator -> LegEntry.Elevator(reason.floor, elevatorRise.takeIf { it != 0f })
             PhotoFor.Checkpoint -> {
                 if (previous == null) return null
                 LegEntry.Checkpoint(previous.anchor.pose.inverse().compose(pose).toYawPose())
@@ -235,6 +353,9 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             previous.anchor.detach()
         }
         current = LegDraft(pendingPhoto!!, image.extentX.takeIf { it > 0f && it.isFinite() } ?: 0f, entry, anchor)
+        elevatorRise = 0f
+        manualFloor = null
+        askFloor = null
         debug?.event(
             "locked",
             "leg" to legs.size,
@@ -265,6 +386,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             photos = photos,
             photo = pendingPhoto?.let { File(store.draft, it) }.takeIf { stage is RecordStage.Locking },
             floor = floor,
+            askFloor = askFloor,
         )
         if (next != _state.value) _state.value = next
     }
@@ -286,6 +408,8 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         const val STEP_METERS = 0.12f
         const val LOCK_FRAMES = 20
         const val LOCK_FRAMES_MEASURED = 6
+        /** Points from the last moments before a ride are usually already inside the elevator. */
+        const val TRIM_BEFORE_RIDE_MS = 1500L
         const val SLOW_LOCK_MS = 8000L
         const val MIN_ROUTE_METERS = 1f
         const val NOTICE_MS = 5000L

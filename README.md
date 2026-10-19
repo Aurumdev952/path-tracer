@@ -17,7 +17,7 @@ It also has a free-trail mode that draws a glowing trail on the floor behind you
 
 - **Start from a photo.** At the entrance, photograph something flat and detailed: the building sign, a poster, a door plate. That photo is how a friend's phone knows where the route begins.
 - **Record by walking.** Walk to the destination. Tap **Floor change** at an elevator, stairs or an escalator, and **Arrived** at the end.
-- **Elevators.** Tracking breaks inside a moving lift, so after the ride you photograph a sign near the elevator (like the floor number) and carry on.
+- **Elevators, noticed on their own.** Tracking breaks inside a moving lift, so the phone's air-pressure sensor watches for rides: a fast climb or drop while you stand still. Recording pauses during the ride, the app guesses the floor from the height (about 3.2 m a floor) and asks you to confirm, then you photograph a sign near the elevator and carry on. Stairs and escalators are slower and come with walking, so they don't trigger it. Phones without a barometer use **Floor change → Elevator** instead.
 - **Checkpoints.** On long routes, photograph a sign along the way. When a follower's camera sees it, the route snaps back into place, which cancels drift.
 - **Share as a file.** A route is one small `.pathroute` file. Send it on WhatsApp, email or anything else. It opens in Path Tracer.
 - **Follow in AR.** Point the camera at the entrance photo and the route appears. Only the next few meters show, as arrows flowing the way to walk. Turns get a big arrow on the floor and a card like "Turn left in 4 m". The phone buzzes before each turn.
@@ -70,7 +70,7 @@ Or open the folder in Android Studio and press **Run**.
 1. Open **Path Tracer**, tap **Record a new route** and allow camera access.
 2. At the entrance, fit a sign, poster or door plate in the white box and tap the button. Move the phone slowly from side to side until it locks on.
 3. Walk to the destination.
-   - At an **elevator**: tap **Floor change → Elevator**, ride, then photograph a sign near the elevator when you step out.
+   - At an **elevator**: just ride. The app notices, asks which floor you got out on (with a guess), then asks for a photo of a sign near the elevator. Without a barometer, tap **Floor change → Elevator** first.
    - On **stairs or an escalator**: tap **Floor change** and pick it. Keep walking.
    - On a long walk: tap **Checkpoint** now and then and photograph a sign.
 4. Tap **Arrived** and give the route a name.
@@ -79,7 +79,7 @@ Or open the folder in Android Studio and press **Run**.
 
 1. On the home screen tap **Share** on a route and send the file. Your friend opens it (or uses **Open route file**).
 2. They tap **Follow**, go to the entrance and point the camera at the sign in the photo.
-3. They follow the arrows. After an elevator ride, the app shows which sign to point at next.
+3. They follow the arrows. In the elevator the app shows the ride's progress ("about 9 of 15 floors") and says when they've reached the right floor, or that they got out too early or too late. Then it shows which sign to point at next.
 
 Good photos: flat, matte, lots of detail (text, logos, pictures), not too small in the box. Plain walls, glass and shiny screens don't work.
 

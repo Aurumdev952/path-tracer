@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -66,6 +67,7 @@ class FollowActivity : ArActivity() {
     private val stretches by lazy { route.stretches() }
     private val follower by lazy { RouteFollower(route) }
     override val renderer: ArRenderer get() = follower
+    override val wantsBarometer = true
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private val voice = mutableStateOf(true)
@@ -180,7 +182,9 @@ private fun FollowOverlay(
 ) {
     Box(Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp)) {
         when (val stage = ui.stage) {
-            is FollowStage.Searching -> Searching(route, stage.stretch, stretchFor(stage.stretch).entry, photoFor(stage.stretch), Modifier.align(Alignment.Center))
+            is FollowStage.Searching -> Searching(
+                route, stage.stretch, stretchFor(stage.stretch).entry, photoFor(stage.stretch), ui.ride, Modifier.align(Alignment.Center),
+            )
             FollowStage.Guiding -> {
                 ui.instruction?.let { InstructionCard(it, ui, Modifier.align(Alignment.TopCenter)) }
                 AnimatedVisibility(
@@ -209,12 +213,16 @@ private fun FollowOverlay(
 }
 
 @Composable
-private fun Searching(route: Route, stretch: Int, entry: LegEntry, photo: File, modifier: Modifier) {
+private fun Searching(route: Route, stretch: Int, entry: LegEntry, photo: File, ride: RideStatus?, modifier: Modifier) {
     Column(
         modifier.fillMaxWidth().background(Glass, RoundedCornerShape(24.dp)).padding(20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
+        if (ride != null && (ride.riding || ride.check is RideCheck.NotYet || ride.check is RideCheck.TooFar)) {
+            RideCard(ride)
+            return@Column
+        }
         Pill(if (stretch == 0) "Finding the start" else "Looking for the next sign", Warn)
         Text(
             when (entry) {
@@ -229,6 +237,30 @@ private fun Searching(route: Route, stretch: Int, entry: LegEntry, photo: File, 
             color = Color.White.copy(alpha = 0.8f), textAlign = TextAlign.Center,
         )
     }
+}
+
+/** In the elevator: how far along the ride is, or why this isn't the floor yet. */
+@Composable
+private fun RideCard(ride: RideStatus) {
+    val to = if (ride.floor.isNotBlank()) " to floor ${ride.floor}" else ""
+    val wrong = !ride.riding && ride.check != null && ride.check != RideCheck.Arrived
+    Pill(if (ride.riding) "Riding$to" else "Elevator stopped", if (wrong) Warn else Accent)
+    TurnArrow(if (ride.rise < 0) Math.PI.toFloat() else null, 64.dp, color = if (wrong) Warn else Accent, bent = false)
+    val expected = ride.expected
+    Text(
+        if (expected != null) "about ${floorsIn(ride.rise)} of ${floorsIn(expected)} floors" else "about ${floorsIn(ride.rise)} floors",
+        color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
+    )
+    if (expected != null) {
+        val done = (ride.rise / expected).coerceIn(0f, 1f)
+        Box(Modifier.fillMaxWidth().height(8.dp).background(Color.White.copy(alpha = 0.15f), RoundedCornerShape(4.dp))) {
+            Box(Modifier.fillMaxWidth(done).fillMaxSize().background(Accent, RoundedCornerShape(4.dp)))
+        }
+    }
+    Text(
+        ride.check?.let { rideMessage(it, ride.floor) } ?: "Stay in the elevator. I'll tell you when you're there",
+        color = if (wrong) Warn else Color.White.copy(alpha = 0.8f), textAlign = TextAlign.Center,
+    )
 }
 
 @Composable

@@ -42,6 +42,12 @@ abstract class ArActivity : ComponentActivity() {
     protected var debug: DebugLog? = null
         private set
 
+    /** Feeds the barometer to the renderer, to notice elevator rides. */
+    protected open val wantsBarometer = false
+    private val barometer by lazy { Barometer(this) }
+    /** Whether elevator rides can be noticed on this phone. */
+    protected val hasBarometer: Boolean get() = wantsBarometer && barometer.available
+
     /** Asks for the sharpest camera image ARCore offers, for taking photos. */
     protected open val wantsSharpImages = false
 
@@ -106,6 +112,10 @@ abstract class ArActivity : ComponentActivity() {
             return
         }
         glView.onResume()
+        if (wantsBarometer) {
+            barometer.onAltitude = renderer::pushAltitude
+            barometer.start()
+        }
     }
 
     private fun createSession(): Session? = try {
@@ -156,6 +166,7 @@ abstract class ArActivity : ComponentActivity() {
             glView.onPause()
             session?.pause()
         }
+        if (wantsBarometer) barometer.stop()
         debug?.event("pause")
         debug?.flush()
     }
