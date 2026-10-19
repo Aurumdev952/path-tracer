@@ -38,6 +38,8 @@ data class FollowUi(
     val speechId: Int = 0,
     /** In or just out of an elevator on the way to the next stretch. */
     val ride: RideStatus? = null,
+    /** While searching: what ARCore makes of the sign photos. */
+    val status: SignStatus? = null,
 )
 
 /** [rise] ridden so far against the recorded [expected] rise (null if not measured). */
@@ -54,6 +56,7 @@ class RouteFollower(route: Route) : ArRenderer() {
 
     private val navigator = Navigator(route)
     private val guideRenderer = GuideRenderer()
+    private val outlineRenderer = SignOutlineRenderer()
     private val depth = DepthTexture()
     private val floorTracker = FloorTracker()
     private val elevator = ElevatorDetector()
@@ -81,6 +84,10 @@ class RouteFollower(route: Route) : ArRenderer() {
     private var searchStartedAt = SystemClock.elapsedRealtime()
     private var lastSample = 0L
     private var wasOffRoute = false
+    private var seen = ImageSeen.None
+    /** The photo just found, outlined for a moment so the follower sees which sign it was. */
+    private var foundImage: AugmentedImage? = null
+    private var foundAt = 0L
 
     init {
         say("Go to the entrance and point your camera at the sign in the photo")
@@ -102,6 +109,7 @@ class RouteFollower(route: Route) : ArRenderer() {
 
     override fun onCreateGl() {
         guideRenderer.create()
+        outlineRenderer.create()
         depth.create()
     }
 
@@ -120,6 +128,7 @@ class RouteFollower(route: Route) : ArRenderer() {
 
         if (camera.trackingState == TrackingState.TRACKING && stage != FollowStage.Arrived) {
             snapToPhotos(session, frame)
+            (stage as? FollowStage.Searching)?.let { watchPhotos(session, it.stretch) }
             this.anchor?.takeIf { stage == FollowStage.Guiding }?.let { held ->
                 keeper.check(session, camera, held, SystemClock.elapsedRealtime())?.let { replacement ->
                     held.detach()
@@ -137,7 +146,40 @@ class RouteFollower(route: Route) : ArRenderer() {
                 }
             }
         }
+        drawFoundOutline(camera)
         publish(hint, guidance, arrow)
+    }
+
+    /** While searching: whether ARCore has spotted any of the photos still ahead. */
+    private fun watchPhotos(session: Session, stretch: Int) {
+        var best = ImageSeen.None
+        for (image in session.getAllTrackables(AugmentedImage::class.java)) {
+            val leg = image.name.removePrefix("leg").toIntOrNull() ?: continue
+            if (navigator.stretchOf(leg) < stretch) continue
+            when (image.trackingState) {
+                TrackingState.TRACKING -> best = ImageSeen.Tracking
+                TrackingState.PAUSED -> if (best == ImageSeen.None) best = ImageSeen.Spotted
+                else -> Unit
+            }
+        }
+        if (best != seen) {
+            debug?.event("image_state", "seen" to best.name.lowercase())
+            seen = best
+        }
+    }
+
+    private fun drawFoundOutline(camera: Camera) {
+        val image = foundImage ?: return
+        val age = SystemClock.elapsedRealtime() - foundAt
+        if (age > OUTLINE_MS) {
+            foundImage = null
+            return
+        }
+        if (image.trackingState != TrackingState.TRACKING) return
+        camera.getViewMatrix(view, 0)
+        camera.getProjectionMatrix(projection, 0, 0.05f, 100f)
+        val fade = 1f - ((age - OUTLINE_MS / 2f) / (OUTLINE_MS / 2f)).coerceIn(0f, 1f)
+        outlineRenderer.draw(image, SignOutlineRenderer.Green, fade, view, projection)
     }
 
     /** Re-anchors the route whenever one of its photos is in clear view. */
@@ -174,6 +216,8 @@ class RouteFollower(route: Route) : ArRenderer() {
             if (moving) {
                 riddenRise = 0f
                 rideCheck = null
+                foundImage = image
+                foundAt = SystemClock.elapsedRealtime()
             }
             if (moving) spokenFor = null
             stage = FollowStage.Guiding
@@ -258,6 +302,7 @@ class RouteFollower(route: Route) : ArRenderer() {
     private fun searchNext(inElevator: Boolean = false) {
         debug?.event("search", "stretch" to navigator.stretch, "in_elevator" to inElevator)
         searchStartedAt = SystemClock.elapsedRealtime()
+        seen = ImageSeen.None
         stage = FollowStage.Searching(navigator.stretch)
         dropAnchor()
         riddenRise = 0f
@@ -371,6 +416,7 @@ class RouteFollower(route: Route) : ArRenderer() {
             ride = elevatorEntry()?.takeIf { riding || rideCheck != null }?.let {
                 RideStatus(riddenRise + if (riding) elevator.rise else 0f, it.rise, it.floor, riding, rideCheck)
             },
+            status = lockStatus(seen, SystemClock.elapsedRealtime() - searchStartedAt).takeIf { stage is FollowStage.Searching },
         )
         if (next != previous) _state.value = next
     }
@@ -381,6 +427,7 @@ class RouteFollower(route: Route) : ArRenderer() {
         const val BUZZ_DISTANCE = 3f
         const val SKIP_WITHIN = 10f
         const val SAMPLE_MS = 1000L
+        const val OUTLINE_MS = 1500L
         const val SNAP_EVERY_FRAMES = 15
         const val SNAP_METERS = 0.04f
         const val SNAP_RADIANS = 0.03f

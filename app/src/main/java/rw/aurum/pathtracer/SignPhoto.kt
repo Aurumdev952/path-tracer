@@ -116,7 +116,59 @@ object SignPhoto {
     var lastFailure: String = ""
         private set
 
+    private operator fun FloatArray.component6() = this[5]
+
     private fun dist(p: Pose, q: Pose) = hypot(hypot(p.tx() - q.tx(), p.ty() - q.ty()), p.tz() - q.tz())
+
+    /**
+     * The framing box in the camera image: its top-left corner and the vectors along its top and
+     * left edges, in image pixels. The camera image is usually rotated against the screen;
+     * sampling along these edges gives an upright picture whatever the rotation.
+     */
+    private fun boxInImage(frame: Frame, viewWidth: Int, viewHeight: Int): FloatArray {
+        val side = viewWidth * BOX
+        val left = (viewWidth - side) / 2
+        val top = (viewHeight - side) / 2
+        val corners = FloatArray(6)
+        frame.transformCoordinates2d(
+            Coordinates2d.VIEW, floatArrayOf(left, top, left + side, top, left, top + side),
+            Coordinates2d.IMAGE_PIXELS, corners,
+        )
+        return floatArrayOf(corners[0], corners[1], corners[2] - corners[0], corners[3] - corners[1], corners[4] - corners[0], corners[5] - corners[1])
+    }
+
+    /** The box in grey levels, [side] pixels square, for [SignDetail]. Null when no camera image is ready. */
+    fun grayBox(frame: Frame, viewWidth: Int, viewHeight: Int, side: Int): ByteArray? {
+        val image = try {
+            frame.acquireCameraImage()
+        } catch (e: NotYetAvailableException) {
+            return null
+        }
+        image.use {
+            val (ox, oy, ux, uy, vx, vy) = boxInImage(frame, viewWidth, viewHeight)
+            val plane = image.planes[0]
+            val buf = plane.buffer
+            val row = plane.rowStride
+            val pix = plane.pixelStride
+            val maxX = image.width - 2
+            val maxY = image.height - 2
+            val out = ByteArray(side * side)
+            for (j in 0 until side) {
+                val fy = (j + 0.5f) / side
+                for (i in 0 until side) {
+                    val fx = (i + 0.5f) / side
+                    val ix = (ox + ux * fx + vx * fy).toInt().coerceIn(0, maxX)
+                    val iy = (oy + uy * fx + vy * fy).toInt().coerceIn(0, maxY)
+                    // Average a 2x2 patch: the box is shrunk several times, and single pixels alias.
+                    val at = iy * row + ix * pix
+                    val sum = (buf.get(at).toInt() and 0xff) + (buf.get(at + pix).toInt() and 0xff) +
+                        (buf.get(at + row).toInt() and 0xff) + (buf.get(at + row + pix).toInt() and 0xff)
+                    out[j * side + i] = (sum / 4).toByte()
+                }
+            }
+            return out
+        }
+    }
 
     /** Returns null when no camera image is ready yet; try again on the next frame. */
     fun capture(frame: Frame, viewWidth: Int, viewHeight: Int): Bitmap? {
@@ -126,23 +178,7 @@ object SignPhoto {
             return null
         }
         image.use {
-            val side = viewWidth * BOX
-            val left = (viewWidth - side) / 2
-            val top = (viewHeight - side) / 2
-            // The box's top-left, top-right and bottom-left corners, in camera image pixels. The
-            // camera image is usually rotated against the screen; sampling along these edges
-            // gives an upright photo whatever the rotation.
-            val corners = FloatArray(6)
-            frame.transformCoordinates2d(
-                Coordinates2d.VIEW, floatArrayOf(left, top, left + side, top, left, top + side),
-                Coordinates2d.IMAGE_PIXELS, corners,
-            )
-            val ox = corners[0]
-            val oy = corners[1]
-            val ux = corners[2] - ox
-            val uy = corners[3] - oy
-            val vx = corners[4] - ox
-            val vy = corners[5] - oy
+            val (ox, oy, ux, uy, vx, vy) = boxInImage(frame, viewWidth, viewHeight)
             val scale = minOf(1f, MAX_SIDE / max(hypot(ux, uy), hypot(vx, vy)))
             val w = (hypot(ux, uy) * scale).roundToInt().coerceAtLeast(1)
             val h = (hypot(vx, vy) * scale).roundToInt().coerceAtLeast(1)
