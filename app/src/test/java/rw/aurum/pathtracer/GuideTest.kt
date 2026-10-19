@@ -168,7 +168,7 @@ class GuideTest {
         val r = route(
             leg(walk(0f to 0f, 0f to -1f)),
             leg(walk(0f to 0f, 1f to 0f), LegEntry.Checkpoint(YawPose(1f, 0.1f, 2f, 0.3f))),
-            leg(walk(0f to 0f, 0f to 1f), LegEntry.Elevator("B1"), listOf(Step(3, FloorChange.Escalator, "G"))),
+            leg(walk(0f to 0f, 0f to 1f), LegEntry.Elevator("B1", -6.4f), listOf(Step(3, FloorChange.Escalator, "G"))),
         )
         val back = Route.fromJson(JSONObject(r.toJson().toString()))
         assertEquals(r.name, back.name)

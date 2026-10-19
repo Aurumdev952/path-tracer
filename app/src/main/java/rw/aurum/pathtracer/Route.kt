@@ -15,8 +15,11 @@ sealed interface LegEntry {
     /** The first leg, at the entrance. */
     data object Start : LegEntry
 
-    /** After an elevator ride. Tracking breaks in a moving lift, so the leg starts from a new photo. */
-    data class Elevator(val floor: String) : LegEntry
+    /**
+     * After an elevator ride. Tracking breaks in a moving lift, so the leg starts from a new photo.
+     * [rise] is how far the ride went in meters (negative going down), if the barometer measured it.
+     */
+    data class Elevator(val floor: String, val rise: Float? = null) : LegEntry
 
     /**
      * A photo taken mid-walk to correct drift. [fromPrevious] is this leg's frame inside the
@@ -86,6 +89,7 @@ private fun Leg.toJson(): JSONObject {
     val entry = when (val e = entry) {
         LegEntry.Start -> JSONObject().put("type", "start")
         is LegEntry.Elevator -> JSONObject().put("type", "elevator").put("floor", e.floor)
+            .apply { e.rise?.let { put("rise", it.toDouble()) } }
         is LegEntry.Checkpoint -> JSONObject().put("type", "checkpoint").put(
             "fromPrevious",
             JSONArray().put(e.fromPrevious.x.toDouble()).put(e.fromPrevious.y.toDouble())
@@ -110,7 +114,10 @@ private fun legFromJson(json: JSONObject): Leg {
         photo = json.getString("photo"),
         photoWidth = json.optDouble("photoWidth", 0.0).toFloat(),
         entry = when (entry.getString("type")) {
-            "elevator" -> LegEntry.Elevator(entry.optString("floor"))
+            "elevator" -> LegEntry.Elevator(
+                entry.optString("floor"),
+                entry.optDouble("rise").takeIf { !it.isNaN() }?.toFloat(),
+            )
             "checkpoint" -> entry.getJSONArray("fromPrevious").let {
                 LegEntry.Checkpoint(
                     YawPose(

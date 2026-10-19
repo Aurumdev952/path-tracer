@@ -63,6 +63,7 @@ class RecordActivity : ArActivity() {
     private val recorder by lazy { RouteRecorder(store) }
     override val renderer: ArRenderer get() = recorder
     override val wantsSharpImages = true
+    override val wantsBarometer = true
 
     override fun configure(session: Session, config: Config) {
         // Walls as well as floors, and depth when the phone has it: both let the recorder measure
@@ -99,6 +100,9 @@ class RecordActivity : ArActivity() {
                 }
             },
             onFinish = recorder::finish,
+            autoElevator = hasBarometer,
+            onConfirmFloor = recorder::confirmFloor,
+            onNotElevator = recorder::notAnElevator,
             onDiscard = ::finish,
         )
     }
@@ -113,6 +117,10 @@ private fun RecordOverlay(
     onCheckpoint: () -> Unit,
     onFloorChange: (FloorChange, String) -> Unit,
     onFinish: (String) -> Unit,
+    /** Elevator rides are noticed on their own (the phone has a barometer). */
+    autoElevator: Boolean,
+    onConfirmFloor: (String) -> Unit,
+    onNotElevator: () -> Unit,
     onDiscard: () -> Unit,
 ) {
     var askFloor by remember { mutableStateOf(false) }
@@ -136,6 +144,7 @@ private fun RecordOverlay(
                             (if (ui.photos > 1) " · ${ui.photos} photos" else ""),
                         Accent,
                     )
+                    is RecordStage.Riding -> Pill("In the elevator · going ${if (stage.rise < 0) "down" else "up"}", Accent)
                     is RecordStage.Saved -> Pill("Saved", Accent)
                 }
             }
@@ -144,8 +153,8 @@ private fun RecordOverlay(
                 val text = ui.hint ?: when (stage) {
                     is RecordStage.Capture -> when (val r = stage.reason) {
                         PhotoFor.Start -> "Stand at the entrance. Fit a sign, poster or door plate in the box, then tap the button"
-                        is PhotoFor.Elevator -> "Ride the elevator" + (if (r.floor.isNotBlank()) " to floor ${r.floor}" else "") +
-                            ". When you step out, photograph a sign near it, like the floor number"
+                        is PhotoFor.Elevator -> (if (r.floor.isNotBlank()) "Floor ${r.floor}. " else "") +
+                            "When you step out of the elevator, photograph a sign near it, like the floor number"
                         PhotoFor.Checkpoint -> "Fit a sign in the box to add a checkpoint. It keeps long routes accurate"
                     }
                     is RecordStage.Locking -> if (stage.slow) {
@@ -153,11 +162,12 @@ private fun RecordOverlay(
                     } else {
                         "Keep the sign in view and move your phone slowly from side to side"
                     }
-                    RecordStage.Walking -> if (ui.meters < 4f) {
-                        "Walk to your destination. Mark elevators, stairs and escalators as you reach them"
-                    } else {
-                        null
+                    RecordStage.Walking -> when {
+                        ui.meters >= 4f -> null
+                        autoElevator -> "Walk to your destination. Elevators are noticed on their own; tap Floor change for stairs or escalators"
+                        else -> "Walk to your destination. Tap Floor change before an elevator, stairs or an escalator"
                     }
+                    is RecordStage.Riding -> "Recording is paused during the ride. You'll photograph a sign when you step out"
                     is RecordStage.Saved -> null
                 }
                 if (text != null) Hint(text, Modifier.padding(bottom = 12.dp))
@@ -200,6 +210,15 @@ private fun RecordOverlay(
                             OutlinedButton(onClick = onCheckpoint, modifier = Modifier.weight(1f)) { Text("Checkpoint") }
                         }
                     }
+                    is RecordStage.Riding -> Column(
+                        Modifier.fillMaxWidth().background(Glass, RoundedCornerShape(24.dp)).padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        TurnArrow(if (stage.rise < 0) Math.PI.toFloat() else null, 44.dp, color = Accent, bent = false)
+                        Text("%.0f m".format(kotlin.math.abs(stage.rise)), color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+                        Text("about ${floorsIn(stage.rise)} floors", color = Color.White.copy(alpha = 0.6f), fontSize = 13.sp)
+                        if (stage.auto) TextButton(onClick = onNotElevator) { Text("Not in an elevator") }
+                    }
                     is RecordStage.Saved -> Unit
                 }
             }
@@ -223,6 +242,17 @@ private fun RecordOverlay(
             onFinish(it)
         },
     )
+    val guess = ui.askFloor
+    if (guess != null && stage is RecordStage.Capture) {
+        NameDialog(
+            title = "Which floor are you on?",
+            initial = guess,
+            confirm = "OK",
+            label = "Guessed from the elevator ride",
+            onDismiss = { onConfirmFloor(guess) },
+            onConfirm = onConfirmFloor,
+        )
+    }
     if (askDiscard) AlertDialog(
         onDismissRequest = { askDiscard = false },
         title = { Text("Discard this route?") },
@@ -318,7 +348,14 @@ private fun FloorChangeDialog(onDismiss: () -> Unit, onConfirm: (FloorChange, St
 }
 
 @Composable
-fun NameDialog(title: String, initial: String, confirm: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+fun NameDialog(
+    title: String,
+    initial: String,
+    confirm: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+    label: String = "Like \"Room 512\" or \"Radiology\"",
+) {
     var name by remember { mutableStateOf(initial) }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -327,7 +364,7 @@ fun NameDialog(title: String, initial: String, confirm: String, onDismiss: () ->
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it.take(60) },
-                label = { Text("Like \"Room 512\" or \"Radiology\"") },
+                label = { Text(label) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Done),
             )

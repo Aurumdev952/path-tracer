@@ -30,6 +30,21 @@ abstract class ArRenderer : GLSurfaceView.Renderer {
         private set
     var displayRotation: () -> Int = { 0 }
 
+    private val altitudes = ConcurrentLinkedQueue<Pair<Long, Float>>()
+
+    /** Queues a barometer reading (milliseconds since boot, meters) for the GL thread. */
+    fun pushAltitude(t: Long, meters: Float) {
+        altitudes.add(t to meters)
+    }
+
+    /** Hands over the barometer readings that arrived since the last call. */
+    protected fun takeAltitudes(each: (Long, Float) -> Unit) {
+        while (true) {
+            val (t, m) = altitudes.poll() ?: return
+            each(t, m)
+        }
+    }
+
     /** Set when debug mode is on. */
     @Volatile var debug: DebugLog? = null
     private var fpsFrames = 0

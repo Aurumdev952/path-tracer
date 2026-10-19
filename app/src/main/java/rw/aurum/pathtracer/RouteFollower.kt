@@ -36,7 +36,12 @@ data class FollowUi(
     /** What to say out loud; [speechId] goes up by one for each new thing to say. */
     val speech: String = "",
     val speechId: Int = 0,
+    /** In or just out of an elevator on the way to the next stretch. */
+    val ride: RideStatus? = null,
 )
+
+/** [rise] ridden so far against the recorded [expected] rise (null if not measured). */
+data class RideStatus(val rise: Float, val expected: Float?, val floor: String, val riding: Boolean, val check: RideCheck?)
 
 /**
  * Guides a follower along a saved route. Photos in the route are ARCore Augmented Images named
@@ -51,6 +56,11 @@ class RouteFollower(route: Route) : ArRenderer() {
     private val guideRenderer = GuideRenderer()
     private val depth = DepthTexture()
     private val floorTracker = FloorTracker()
+    private val elevator = ElevatorDetector()
+    /** Meters ridden since leaving the last stretch for an elevator. */
+    private var riddenRise = 0f
+    private var riding = false
+    private var rideCheck: RideCheck? = null
 
     /** Set by the activity when the phone supports ARCore depth and it is switched on. */
     @Volatile var useDepth = false
@@ -101,6 +111,11 @@ class RouteFollower(route: Route) : ArRenderer() {
         var guidance: Guidance? = null
         var arrow: Float? = null
         if (useDepth) depth.update(frame)
+        if (camera.trackingState == TrackingState.TRACKING) {
+            elevator.position(SystemClock.elapsedRealtime(), camera.pose.tx(), camera.pose.tz())
+        }
+        takeAltitudes { t, m -> elevator.altitude(t, m)?.let(::onElevator) }
+        debug?.show("baro_m", elevator.altitude)
 
         if (camera.trackingState == TrackingState.TRACKING && stage != FollowStage.Arrived) {
             snapToPhotos(session, frame)
@@ -149,6 +164,10 @@ class RouteFollower(route: Route) : ArRenderer() {
                 }
             }
             navigator.lockOn(leg)
+            if (moving) {
+                riddenRise = 0f
+                rideCheck = null
+            }
             if (moving) spokenFor = null
             stage = FollowStage.Guiding
             dropAnchor()
@@ -228,16 +247,49 @@ class RouteFollower(route: Route) : ArRenderer() {
     }
 
     /** After reaching an elevator: wait for the photo that starts the next stretch. */
-    private fun searchNext() {
-        debug?.event("search", "stretch" to navigator.stretch)
+    private fun searchNext(inElevator: Boolean = false) {
+        debug?.event("search", "stretch" to navigator.stretch, "in_elevator" to inElevator)
         searchStartedAt = SystemClock.elapsedRealtime()
         stage = FollowStage.Searching(navigator.stretch)
         dropAnchor()
-        val floor = (navigator.stretches[navigator.stretch].entry as? LegEntry.Elevator)?.floor.orEmpty()
+        riddenRise = 0f
+        rideCheck = null
+        val floor = elevatorEntry()?.floor.orEmpty()
+        val to = if (floor.isNotBlank()) " to floor $floor" else ""
         say(
-            "Take the elevator" + (if (floor.isNotBlank()) " to floor $floor" else "") +
-                ". When you step out, point your camera at the sign in the photo",
+            if (inElevator) "Riding$to. I'll tell you when you're there"
+            else "Take the elevator$to. When you step out, point your camera at the sign in the photo",
         )
+    }
+
+    /** The elevator ride that leads to the stretch being searched for, if that's how it starts. */
+    private fun elevatorEntry(): LegEntry.Elevator? =
+        ((stage as? FollowStage.Searching)?.stretch?.let { navigator.stretches[it].entry }) as? LegEntry.Elevator
+
+    private fun onElevator(e: ElevatorDetector.Event) {
+        when (e) {
+            is ElevatorDetector.Event.RideStarted -> {
+                // Stepping into the elevator before reaching the end of the path still counts.
+                val nextIsElevator = navigator.stretches.getOrNull(navigator.stretch + 1)?.entry is LegEntry.Elevator
+                if (stage == FollowStage.Guiding && nextIsElevator) {
+                    navigator.skip()
+                    searchNext(inElevator = true)
+                }
+                riding = elevatorEntry() != null
+                debug?.event("ride_start", "up" to e.up, "counted" to riding)
+            }
+            is ElevatorDetector.Event.RideEnded -> {
+                if (!riding) return
+                riding = false
+                riddenRise += e.rise
+                val entry = elevatorEntry() ?: return
+                val check = checkRide(entry.rise, riddenRise)
+                rideCheck = check
+                debug?.event("ride_end", "rise_m" to e.rise, "total_m" to riddenRise, "expected_m" to entry.rise, "check" to check.toString())
+                say(rideMessage(check, entry.floor))
+            }
+            ElevatorDetector.Event.RideCancelled -> riding = false
+        }
     }
 
     private fun say(text: String) {
@@ -308,6 +360,9 @@ class RouteFollower(route: Route) : ArRenderer() {
                 g != null && navigator.stretches[navigator.stretch].path.length - g.progress < SKIP_WITHIN,
             speech = speech,
             speechId = speechId,
+            ride = elevatorEntry()?.takeIf { riding || rideCheck != null }?.let {
+                RideStatus(riddenRise + if (riding) elevator.rise else 0f, it.rise, it.floor, riding, rideCheck)
+            },
         )
         if (next != previous) _state.value = next
     }
