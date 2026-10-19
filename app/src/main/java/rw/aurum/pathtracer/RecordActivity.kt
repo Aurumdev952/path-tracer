@@ -8,6 +8,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -44,16 +46,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.google.ar.core.Config
 import com.google.ar.core.Session
+import kotlinx.coroutines.flow.StateFlow
 import java.io.File
 
 /** Records a route: photo of a sign at the entrance, then walk, with photos after elevators. */
@@ -89,6 +94,7 @@ class RecordActivity : ArActivity() {
         }
         RecordOverlay(
             ui = ui,
+            corners = recorder.corners,
             onShutter = recorder::takePhoto,
             onRetake = recorder::retake,
             onCancelCheckpoint = recorder::cancelCheckpoint,
@@ -111,6 +117,7 @@ class RecordActivity : ArActivity() {
 @Composable
 private fun RecordOverlay(
     ui: RecordUi,
+    corners: StateFlow<FloatArray>,
     onShutter: () -> Unit,
     onRetake: () -> Unit,
     onCancelCheckpoint: () -> Unit,
@@ -132,7 +139,10 @@ private fun RecordOverlay(
     val reason = (stage as? RecordStage.Capture)?.reason ?: (stage as? RecordStage.Locking)?.reason
     Box(Modifier.fillMaxSize()) {
         if (stage is RecordStage.Capture || stage is RecordStage.Locking) {
-            FramingBox(locking = stage is RecordStage.Locking)
+            FramingBox(locking = stage is RecordStage.Locking, ready = ui.status?.good == true, corners = corners) {
+                if (ui.detail != null) DetailMeter(ui.detail)
+                ui.status?.let { SignStatusLine(it) }
+            }
         }
         Box(Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp)) {
             Column(Modifier.align(Alignment.TopCenter), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -262,21 +272,72 @@ private fun RecordOverlay(
     )
 }
 
-/** The square the sign must fit in. Matches [SignPhoto.BOX], centered on the screen. */
+/**
+ * The square the sign must fit in. Matches [SignPhoto.BOX], centered on the screen. While framing,
+ * dots mark the [corners] ARCore can grab onto and the border turns green when the sign is [ready];
+ * [below] goes under the box.
+ */
 @Composable
-private fun FramingBox(locking: Boolean) {
+private fun FramingBox(locking: Boolean, ready: Boolean, corners: StateFlow<FloatArray>, below: @Composable () -> Unit) {
     val pulse by rememberInfiniteTransition(label = "lock").animateFloat(
         initialValue = 0.35f, targetValue = 1f,
         animationSpec = infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "alpha",
     )
+    val dots = corners.collectAsState()
     BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        val side = maxWidth * SignPhoto.BOX
         Box(
             Modifier
-                .size(maxWidth * SignPhoto.BOX)
+                .size(side)
                 .alpha(if (locking) pulse else 1f)
-                .border(3.dp, if (locking) Accent else Color.White, RoundedCornerShape(18.dp))
-        )
+                .border(3.dp, if (locking || ready) Accent else Color.White, RoundedCornerShape(18.dp))
+        ) {
+            // Read the corners only while drawing, so new ones redraw the dots and nothing else.
+            if (!locking) Canvas(Modifier.fillMaxSize()) {
+                val c = dots.value
+                for (i in 0 until c.size / 2) {
+                    drawCircle(Accent.copy(alpha = 0.85f), radius = 2.5.dp.toPx(), center = Offset(c[2 * i] * size.width, c[2 * i + 1] * size.height))
+                }
+            }
+        }
+        Column(
+            Modifier.offset(y = side / 2 + 44.dp).padding(horizontal = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) { below() }
     }
+}
+
+/** How much detail is in the box: three bars, like signal strength. */
+@Composable
+private fun DetailMeter(level: SignDetail.Level) {
+    val bars = level.ordinal + 1
+    val color = if (level == SignDetail.Level.Weak) Warn else Accent
+    Row(
+        Modifier.background(Glass, CircleShape).padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text("Detail", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+        Spacer(Modifier.size(4.dp))
+        for (i in 1..3) {
+            Box(Modifier.size(width = 14.dp, height = 6.dp).background(if (i <= bars) color else Color.White.copy(alpha = 0.2f), RoundedCornerShape(3.dp)))
+        }
+        Spacer(Modifier.size(4.dp))
+        Text(if (level == SignDetail.Level.Ok) "OK" else level.name, color = color, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+@Composable
+private fun SignStatusLine(status: SignStatus) {
+    Text(
+        status.text,
+        color = if (status.good) Accent else Warn,
+        fontSize = 14.sp,
+        fontWeight = FontWeight.Medium,
+        textAlign = TextAlign.Center,
+        modifier = Modifier.background(Glass, RoundedCornerShape(12.dp)).padding(horizontal = 12.dp, vertical = 6.dp),
+    )
 }
 
 @Composable

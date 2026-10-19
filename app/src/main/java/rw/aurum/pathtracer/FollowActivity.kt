@@ -181,10 +181,18 @@ private fun FollowOverlay(
     onStop: () -> Unit,
 ) {
     Box(Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp)) {
-        when (val stage = ui.stage) {
-            is FollowStage.Searching -> Searching(
-                route, stage.stretch, stretchFor(stage.stretch).entry, photoFor(stage.stretch), ui.ride, Modifier.align(Alignment.Center),
-            )
+        val stage = ui.stage
+        val ride = ui.ride?.takeIf { stage is FollowStage.Searching && (it.riding || it.check is RideCheck.NotYet || it.check is RideCheck.TooFar) }
+        when (stage) {
+            is FollowStage.Searching -> if (ride != null) {
+                Column(
+                    Modifier.align(Alignment.Center).fillMaxWidth().background(Glass, RoundedCornerShape(24.dp)).padding(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) { RideCard(ride) }
+            } else {
+                Pill(if (stage.stretch == 0) "Finding the start" else "Looking for the next sign", Warn, Modifier.align(Alignment.TopCenter))
+            }
             FollowStage.Guiding -> {
                 ui.instruction?.let { InstructionCard(it, ui, Modifier.align(Alignment.TopCenter)) }
                 AnimatedVisibility(
@@ -201,6 +209,9 @@ private fun FollowOverlay(
 
         if (ui.stage != FollowStage.Arrived) {
             Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                if (stage is FollowStage.Searching && ride == null) {
+                    Searching(route, stretchFor(stage.stretch).entry, photoFor(stage.stretch), ui.status, Modifier.padding(bottom = 12.dp))
+                }
                 ui.hint?.let { Hint(it, Modifier.padding(bottom = 12.dp)) }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (ui.canSkip) OutlinedButton(onClick = onSkip) { Text("I'm at the elevator") }
@@ -212,30 +223,29 @@ private fun FollowOverlay(
     }
 }
 
+/** The sign to look for, kept low on the screen so the camera view and the sign stay in sight. */
 @Composable
-private fun Searching(route: Route, stretch: Int, entry: LegEntry, photo: File, ride: RideStatus?, modifier: Modifier) {
-    Column(
-        modifier.fillMaxWidth().background(Glass, RoundedCornerShape(24.dp)).padding(20.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+private fun Searching(route: Route, entry: LegEntry, photo: File, status: SignStatus?, modifier: Modifier) {
+    Row(
+        modifier.fillMaxWidth().background(Glass, RoundedCornerShape(24.dp)).padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        if (ride != null && (ride.riding || ride.check is RideCheck.NotYet || ride.check is RideCheck.TooFar)) {
-            RideCard(ride)
-            return@Column
+        PhotoThumb(photo, 96)
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                when (entry) {
+                    is LegEntry.Elevator -> "Take the elevator" + (if (entry.floor.isNotBlank()) " to floor ${entry.floor}" else "")
+                    else -> "Go to the entrance of ${route.name}"
+                },
+                color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold,
+            )
+            Text(
+                if (entry is LegEntry.Elevator) "When you step out, point your camera at this sign" else "Find this sign and point your camera at it",
+                color = Color.White.copy(alpha = 0.8f), fontSize = 14.sp,
+            )
+            status?.let { Text(it.text, color = if (it.good) Accent else Warn, fontSize = 14.sp, fontWeight = FontWeight.Medium) }
         }
-        Pill(if (stretch == 0) "Finding the start" else "Looking for the next sign", Warn)
-        Text(
-            when (entry) {
-                is LegEntry.Elevator -> "Take the elevator" + (if (entry.floor.isNotBlank()) " to floor ${entry.floor}" else "")
-                else -> "Go to the entrance of ${route.name}"
-            },
-            color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
-        )
-        PhotoThumb(photo, 220)
-        Text(
-            if (entry is LegEntry.Elevator) "When you step out, point your camera at this sign" else "Find this sign and point your camera at it",
-            color = Color.White.copy(alpha = 0.8f), textAlign = TextAlign.Center,
-        )
     }
 }
 

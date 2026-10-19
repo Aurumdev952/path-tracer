@@ -5,6 +5,7 @@ import android.os.SystemClock
 import com.google.ar.core.Anchor
 import com.google.ar.core.AugmentedImage
 import com.google.ar.core.AugmentedImageDatabase
+import com.google.ar.core.Camera
 import com.google.ar.core.Frame
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
@@ -48,6 +49,9 @@ data class RecordUi(
     val floor: String = "",
     /** After an elevator ride the barometer noticed: ask which floor this is. */
     val askFloor: FloorQuestion? = null,
+    /** What the app makes of the sign in the box, or of the photo it is locking on to. */
+    val status: SignStatus? = null,
+    val detail: SignDetail.Level? = null,
 )
 
 /**
@@ -59,11 +63,17 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     private val _state = MutableStateFlow(RecordUi())
     val state: StateFlow<RecordUi> = _state
 
+    private val _corners = MutableStateFlow(FloatArray(0))
+    /** Corners found in the framing box, as x, y pairs from 0 to 1, while framing a photo. */
+    val corners: StateFlow<FloatArray> = _corners
+
     private class LegDraft(val photo: String, val width: Float, val entry: LegEntry, var anchor: Anchor) {
         val points = mutableListOf<TrailPoint>()
         /** When each point was recorded, to drop the ones taken inside an elevator. */
         val times = mutableListOf<Long>()
         val steps = mutableListOf<Step>()
+        var meters = 0f
+        var nudged = false
         fun toLeg() = Leg(photo, width, entry, points.toList(), steps.toList())
 
         /** Drops points recorded at or after [t], keeping at least the first. */
@@ -78,8 +88,8 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     }
 
     private val trailRenderer = TrailRenderer()
+    private val outlineRenderer = SignOutlineRenderer()
     private val floorTracker = FloorTracker()
-    private var database: AugmentedImageDatabase? = null
 
     private var stage: RecordStage = RecordStage.Capture(PhotoFor.Start)
     private val legs = mutableListOf<Leg>()
@@ -95,6 +105,15 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     private var hint: String? = null
     private var hintUntil = 0L
     private var floor = ""
+    private var frameCount = 0L
+
+    /** Live checks while framing a photo: can the sign be measured, and how much detail it has. */
+    private var measurable: Boolean? = null
+    private var detail: SignDetail.Result? = null
+    private var seen = ImageSeen.None
+    /** The photo just locked on to, outlined for a moment so the user sees which sign it was. */
+    private var lockedImage: AugmentedImage? = null
+    private var lockedAt = 0L
 
     private val elevator = ElevatorDetector()
     private val keeper = AnchorKeeper { name, fields -> debug?.event(name, *fields) }
@@ -199,9 +218,13 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         stage = RecordStage.Saved(route.id)
     }
 
-    override fun onCreateGl() = trailRenderer.create()
+    override fun onCreateGl() {
+        trailRenderer.create()
+        outlineRenderer.create()
+    }
 
     override fun onFrame(session: Session, frame: Frame) {
+        frameCount++
         val camera = frame.camera
         val tracking = camera.trackingState == TrackingState.TRACKING
         var frameHint = trackingHint(camera)
@@ -213,6 +236,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
 
         if (tracking && captureRequested) capture(session, frame)
         val s = stage
+        if (s !is RecordStage.Capture) forgetSignChecks() else if (!captureRequested) checkSign(frame, tracking)
         if (tracking && s is RecordStage.Locking) frameHint = frameHint ?: lockOn(session, s)
 
         val leg = current
@@ -229,8 +253,14 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             val head = TrailPoint(local[0], local[1], local[2])
             val last = leg.points.lastOrNull()
             if (last == null || head.distanceTo(last) >= STEP_METERS) {
+                if (last != null) leg.meters += head.distanceTo(last)
                 leg.points += head
                 leg.times += SystemClock.elapsedRealtime()
+            }
+            if (!leg.nudged && leg.meters >= CHECKPOINT_NUDGE_METERS && stage == RecordStage.Walking) {
+                leg.nudged = true
+                notice("Good spot for a checkpoint. Tap Checkpoint and photograph a sign nearby", NUDGE_MS)
+                debug?.event("checkpoint_nudge", "leg_m" to leg.meters)
             }
 
             camera.getViewMatrix(view, 0)
@@ -239,7 +269,45 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             val seconds = (SystemClock.elapsedRealtime() - startTime) / 1000f
             trailRenderer.draw(leg.points, head, model, view, projection, seconds)
         }
+        drawLockedOutline(camera)
         publish(frameHint)
+    }
+
+    /** Every few frames while framing: can the sign be measured from here, and how much detail is there? */
+    private fun checkSign(frame: Frame, tracking: Boolean) {
+        when (frameCount % CHECK_EVERY) {
+            0L -> {
+                val ok = if (tracking) SignPhoto.measure(frame, width, height) != null else null
+                if (ok != measurable) debug?.event("ready", "measurable" to ok, "why" to SignPhoto.lastFailure.takeIf { ok == false })
+                measurable = ok
+            }
+            CHECK_EVERY / 2L -> SignPhoto.grayBox(frame, width, height, SignDetail.SIDE)?.let { gray ->
+                val r = SignDetail.analyze(gray, SignDetail.SIDE)
+                detail = r
+                _corners.value = r.corners
+                debug?.show("detail", "${r.level.name.lowercase()} ${r.count}/${r.cells}")
+            }
+        }
+    }
+
+    private fun forgetSignChecks() {
+        if (measurable == null && detail == null) return
+        measurable = null
+        detail = null
+        _corners.value = FloatArray(0)
+    }
+
+    private fun drawLockedOutline(camera: Camera) {
+        val image = lockedImage ?: return
+        val age = SystemClock.elapsedRealtime() - lockedAt
+        if (age > OUTLINE_MS || image.trackingState != TrackingState.TRACKING) {
+            if (age > OUTLINE_MS) lockedImage = null
+            return
+        }
+        camera.getViewMatrix(view, 0)
+        camera.getProjectionMatrix(projection, 0, 0.05f, 100f)
+        val fade = 1f - ((age - OUTLINE_MS / 2f) / (OUTLINE_MS / 2f)).coerceIn(0f, 1f)
+        outlineRenderer.draw(image, SignOutlineRenderer.Green, fade, view, projection)
     }
 
     private fun onElevator(e: ElevatorDetector.Event) {
@@ -322,7 +390,8 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         captureRequested = false
         val measureFrames = measureTries
         measureTries = 0
-        val db = database ?: AugmentedImageDatabase(session).also { database = it }
+        // Only the new photo: older ones aren't needed to record, and each one costs ARCore time.
+        val db = AugmentedImageDatabase(session)
         val index = legs.size + if (current != null) 1 else 0
         val imageName = "leg${index}_${attempts++}"
         val measured = size.width
@@ -330,12 +399,13 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             db.addImage(imageName, bitmap, measured)
         } catch (e: ImageInsufficientQualityException) {
             notice("Not enough detail in that photo. Try a sign with text or a picture")
-            debug?.event("photo_rejected", "leg" to index, "size" to "${bitmap.width}x${bitmap.height}", "measured_m" to measured)
+            debug?.event("photo_rejected", "leg" to index, "size" to "${bitmap.width}x${bitmap.height}", "measured_m" to measured, *detailFields())
             return
         }
         debug?.event(
             "photo", "leg" to index, "size" to "${bitmap.width}x${bitmap.height}", "measured_m" to measured,
             "how" to size.how, "after_frames" to measureFrames, "for" to s.reason.javaClass.simpleName.lowercase(),
+            *detailFields(),
         )
         debug?.show("measured", measured)
         session.configure(session.config.apply { augmentedImageDatabase = db })
@@ -345,15 +415,30 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         pendingPhoto = photo
         lockFrames = 0
         lockStartedAt = SystemClock.elapsedRealtime()
+        seen = ImageSeen.None
         hint = null
         stage = RecordStage.Locking(s.reason, slow = false)
     }
 
+    /** The detail check of the box when the photo was taken, to tune [SignDetail] against ARCore. */
+    private fun detailFields(): Array<Pair<String, Any?>> = detail?.let {
+        arrayOf("detail" to it.level.name.lowercase(), "corners" to it.count, "cells" to it.cells, "brightness" to it.brightness.toInt())
+    } ?: emptyArray()
+
     /** Waits until ARCore tracks the new photo steadily, then starts a leg from it. */
     private fun lockOn(session: Session, s: RecordStage.Locking): String? {
-        val image = session.getAllTrackables(AugmentedImage::class.java).firstOrNull {
-            it.name == pendingImage && it.trackingState == TrackingState.TRACKING &&
-                it.trackingMethod == AugmentedImage.TrackingMethod.FULL_TRACKING
+        val candidate = session.getAllTrackables(AugmentedImage::class.java).firstOrNull { it.name == pendingImage }
+        val nowSeen = when (candidate?.trackingState) {
+            TrackingState.TRACKING -> ImageSeen.Tracking
+            TrackingState.PAUSED -> ImageSeen.Spotted
+            else -> ImageSeen.None
+        }
+        if (nowSeen != seen) {
+            debug?.event("image_state", "seen" to nowSeen.name.lowercase(), "method" to candidate?.trackingMethod?.name?.lowercase())
+            seen = nowSeen
+        }
+        val image = candidate?.takeIf {
+            it.trackingState == TrackingState.TRACKING && it.trackingMethod == AugmentedImage.TrackingMethod.FULL_TRACKING
         }
         if (image == null) {
             if (!s.slow && SystemClock.elapsedRealtime() - lockStartedAt > SLOW_LOCK_MS) {
@@ -381,6 +466,8 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             previous.anchor.detach()
         }
         current = LegDraft(pendingPhoto!!, image.extentX.takeIf { it > 0f && it.isFinite() } ?: 0f, entry, anchor)
+        lockedImage = image
+        lockedAt = SystemClock.elapsedRealtime()
         keeper.reset()
         elevatorRise = 0f
         manualFloor = null
@@ -415,14 +502,20 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             photo = pendingPhoto?.let { File(store.draft, it) }.takeIf { stage is RecordStage.Locking },
             floor = floor,
             askFloor = askFloor,
+            status = when (stage) {
+                is RecordStage.Capture -> captureStatus(detail?.level, detail?.dark == true, measurable)
+                is RecordStage.Locking -> lockStatus(seen, SystemClock.elapsedRealtime() - lockStartedAt)
+                else -> null
+            },
+            detail = detail?.level.takeIf { stage is RecordStage.Capture },
         )
         if (next != _state.value) _state.value = next
     }
 
     /** Shows [text] for a few seconds. */
-    private fun notice(text: String) {
+    private fun notice(text: String, ms: Long = NOTICE_MS) {
         hint = text
-        hintUntil = SystemClock.elapsedRealtime() + NOTICE_MS
+        hintUntil = SystemClock.elapsedRealtime() + ms
     }
 
     private fun walkedMeters(): Float = legs.sumOf { it.lengthMeters.toDouble() }.toFloat() +
@@ -442,5 +535,10 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         const val SLOW_LOCK_MS = 8000L
         const val MIN_ROUTE_METERS = 1f
         const val NOTICE_MS = 5000L
+        const val NUDGE_MS = 8000L
+        /** Drift grows with distance; a fresh photo this often keeps long routes in place. */
+        const val CHECKPOINT_NUDGE_METERS = 40f
+        const val CHECK_EVERY = 6L
+        const val OUTLINE_MS = 1500L
     }
 }
