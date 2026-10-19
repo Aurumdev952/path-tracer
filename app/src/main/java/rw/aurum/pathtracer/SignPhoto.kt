@@ -5,6 +5,7 @@ import com.google.ar.core.Coordinates2d
 import com.google.ar.core.DepthPoint
 import com.google.ar.core.Frame
 import com.google.ar.core.Plane
+import com.google.ar.core.Point
 import com.google.ar.core.Pose
 import com.google.ar.core.exceptions.NotYetAvailableException
 import kotlin.math.hypot
@@ -20,33 +21,62 @@ object SignPhoto {
     private const val MIN_WIDTH = 0.05f
     private const val MAX_WIDTH = 4f
 
+    /** The real width the framing box covers, and how it was found ("edges" or "center"). */
+    data class Size(val width: Float, val how: String)
+
     /**
-     * Measures the real width of what the framing box covers, in meters, by finding the surface
-     * at the box's left edge, right edge and center (detected walls and floors, or depth). Returns
-     * null unless all three agree on one flat surface.
+     * Measures the real width of what the framing box covers, in meters. First from the surface
+     * at the box's left edge, right edge and center (detected walls and floors, or depth), which
+     * must agree on one flat surface. Failing that, from the distance to the center alone, assuming
+     * the sign faces the camera. Null with the reason in [lastFailure] when neither works.
      */
-    fun measureWidth(frame: Frame, viewWidth: Int, viewHeight: Int): Float? {
+    fun measure(frame: Frame, viewWidth: Int, viewHeight: Int): Size? {
         val side = viewWidth * BOX
         val left = (viewWidth - side) / 2
         val y = viewHeight / 2f
-        fun surface(x: Float): Pose? = frame.hitTest(x, y).firstOrNull { hit ->
+        fun surface(x: Float, anyPoint: Boolean = false): Pose? = frame.hitTest(x, y).firstOrNull { hit ->
             when (val t = hit.trackable) {
                 is Plane -> t.isPoseInPolygon(hit.hitPose)
                 is DepthPoint -> true
+                is Point -> anyPoint
                 else -> false
             }
         }?.hitPose
-        val a = surface(left + side * EDGE) ?: return null
-        val b = surface(left + side * (1 - EDGE)) ?: return null
-        val c = surface(viewWidth / 2f) ?: return null
-        fun dist(p: Pose, q: Pose) = hypot(hypot(p.tx() - q.tx(), p.ty() - q.ty()), p.tz() - q.tz())
-        val across = dist(a, b)
-        // The center must sit near the middle of the two edges, or the box spans a corner or a gap.
-        val mid = Pose.makeTranslation((a.tx() + b.tx()) / 2, (a.ty() + b.ty()) / 2, (a.tz() + b.tz()) / 2)
-        if (dist(c, mid) > across * 0.15f) return null
-        val width = across / (1 - 2 * EDGE)
-        return width.takeIf { it in MIN_WIDTH..MAX_WIDTH }
+        val a = surface(left + side * EDGE)
+        val b = surface(left + side * (1 - EDGE))
+        val c = surface(viewWidth / 2f)
+        if (a != null && b != null && c != null) {
+            val across = dist(a, b)
+            // The center must sit near the middle of the two edges, or the box spans a corner or a gap.
+            val mid = Pose.makeTranslation((a.tx() + b.tx()) / 2, (a.ty() + b.ty()) / 2, (a.tz() + b.tz()) / 2)
+            val width = across / (1 - 2 * EDGE)
+            if (dist(c, mid) <= across * 0.15f && width in MIN_WIDTH..MAX_WIDTH) return Size(width, "edges")
+        }
+        val center = c ?: surface(viewWidth / 2f, anyPoint = true)
+        if (center == null) {
+            lastFailure = "no surface at the center (edges ${if (a == null) "-" else "ok"}/${if (b == null) "-" else "ok"})"
+            return null
+        }
+        // Depth along the camera's view direction, and the view's horizontal focal length from the
+        // projection matrix: the box spans BOX of the view, so 2 * BOX * depth / projection[0] meters.
+        val cam = frame.camera.pose
+        val forward = cam.zAxis.map { -it }
+        val depth = (center.tx() - cam.tx()) * forward[0] + (center.ty() - cam.ty()) * forward[1] + (center.tz() - cam.tz()) * forward[2]
+        val projection = FloatArray(16)
+        frame.camera.getProjectionMatrix(projection, 0, 0.05f, 100f)
+        val width = 2 * BOX * depth / projection[0]
+        if (width !in MIN_WIDTH..MAX_WIDTH) {
+            lastFailure = "estimate out of range: %.2f m at %.2f m".format(java.util.Locale.US, width, depth)
+            return null
+        }
+        return Size(width, "center")
     }
+
+    /** Why the last [measure] returned null, for the debug log. */
+    var lastFailure: String = ""
+        private set
+
+    private fun dist(p: Pose, q: Pose) = hypot(hypot(p.tx() - q.tx(), p.ty() - q.ty()), p.tz() - q.tz())
 
     /** Returns null when no camera image is ready yet; try again on the next frame. */
     fun capture(frame: Frame, viewWidth: Int, viewHeight: Int): Bitmap? {
