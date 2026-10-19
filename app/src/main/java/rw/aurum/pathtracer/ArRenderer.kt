@@ -45,6 +45,21 @@ abstract class ArRenderer : GLSurfaceView.Renderer {
         }
     }
 
+    private val steps = ConcurrentLinkedQueue<Long>()
+
+    /** Whether steps get counted: the phone has a step detector and may use it. */
+    @Volatile var stepsKnown = false
+
+    /** Queues a step (milliseconds since boot) for the GL thread. */
+    fun pushStep(t: Long) {
+        steps.add(t)
+    }
+
+    /** Hands over the steps reported since the last call. */
+    protected fun takeSteps(each: (Long) -> Unit) {
+        while (true) each(steps.poll() ?: return)
+    }
+
     /** Set when debug mode is on. */
     @Volatile var debug: DebugLog? = null
     private var fpsFrames = 0

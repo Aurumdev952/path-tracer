@@ -9,8 +9,8 @@ import kotlin.math.roundToInt
  * Notices elevator rides from barometric altitude. An elevator climbs fast while you stand still;
  * stairs and escalators climb slowly while you move forward, so they don't count.
  *
- * Feed it [altitude] samples from the pressure sensor and, while ARCore tracks, [position]
- * samples. Times are in milliseconds on one clock.
+ * Feed it [altitude] samples from the pressure sensor, [step]s from the step detector and, while
+ * ARCore tracks, [position] samples. Times are in milliseconds on one clock.
  */
 class ElevatorDetector(private val c: Config = Config()) {
 
@@ -24,8 +24,29 @@ class ElevatorDetector(private val c: Config = Config()) {
         /** ...and the height changed at least this much over [lookbackS]... */
         val startRise: Float = 1.6f,
         val lookbackS: Float = 4f,
-        /** ...while walking less than this far. */
+        /** ...while standing: walking less than this far and taking at most [maxSteps] steps. */
         val maxWalk: Float = 1.5f,
+        val maxSteps: Int = 2,
+        /**
+         * Slow lifts count from [slowStartSpeed] and [slowStartRise], but only when ARCore tracked
+         * at least [minTracked] of the lookback, so the walk check can still turn escalators away.
+         */
+        val slowStartSpeed: Float = 0.35f,
+        val slowStartRise: Float = 1.2f,
+        val minTracked: Float = 0.6f,
+        /** Step reports come in late: steps taken during a ride cancel it until this long after it was noticed. */
+        val confirmS: Float = 2f,
+        /**
+         * A door or the air handling can shift the pressure by a meter's worth or more at once. A car
+         * leaving from rest gains at most about 0.75 m in its first second, and far less in [jumpS].
+         */
+        val jumpRise: Float = 1.2f,
+        val jumpS: Float = 0.4f,
+        /**
+         * A height change that took less time than this, leaving out its first and last quarter
+         * meter, was a pressure step. One floor at 1.25 m/s² takes about 2 s by that measure.
+         */
+        val minMotionS: Float = 1.5f,
         /** A ride ends after the height holds still (below this speed) for [stopHoldS]. */
         val stopSpeed: Float = 0.15f,
         val stopHoldS: Float = 2.5f,
@@ -46,11 +67,19 @@ class ElevatorDetector(private val c: Config = Config()) {
     private class Spot(val t: Long, val x: Float, val z: Float)
 
     private val history = ArrayDeque<Sample>()
+    private val raw = ArrayDeque<Sample>()
     private val spots = ArrayDeque<Spot>()
+    private val steps = ArrayDeque<Long>()
     private var smoothed = Float.NaN
     private var lastT = 0L
+    private var lastJump = Long.MIN_VALUE
+    private var noticedAt = 0L
+    private var startedAt = 0L
     private var startAlt = 0f
     private var stillSince = -1L
+
+    /** Whether [step]s are coming: the phone has a step detector and may use it. Unknown steps can't veto a ride. */
+    var stepsKnown = false
 
     var riding = false
         private set
@@ -67,6 +96,12 @@ class ElevatorDetector(private val c: Config = Config()) {
         while (spots.isNotEmpty() && t - spots.first().t > KEEP_MS) spots.removeFirst()
     }
 
+    /** A step taken at [t]. Reports may arrive a second or two late. */
+    fun step(t: Long) {
+        steps.addLast(t)
+        while (steps.isNotEmpty() && t - steps.first() > KEEP_MS) steps.removeFirst()
+    }
+
     fun altitude(t: Long, meters: Float): Event? {
         smoothed = if (smoothed.isNaN()) {
             meters
@@ -77,6 +112,9 @@ class ElevatorDetector(private val c: Config = Config()) {
         lastT = t
         history.addLast(Sample(t, smoothed))
         while (history.isNotEmpty() && t - history.first().t > KEEP_MS) history.removeFirst()
+        raw.addLast(Sample(t, meters))
+        while (raw.isNotEmpty() && t - raw.first().t > KEEP_MS) raw.removeFirst()
+        if (jumped(t)) lastJump = t
         if (t - history.first().t < c.slopeWindowS * 1000) return null
 
         val speed = slope(t)
@@ -84,12 +122,18 @@ class ElevatorDetector(private val c: Config = Config()) {
     }
 
     private fun maybeStart(t: Long, speed: Float): Event? {
-        if (abs(speed) < c.startSpeed) return null
-        val then = at(t - (c.lookbackS * 1000).toLong()) ?: return null
-        if (abs(smoothed - then) < c.startRise) return null
-        if (walked(t - (c.lookbackS * 1000).toLong(), t) > c.maxWalk) return null
+        val from = t - (c.lookbackS * 1000).toLong()
+        val tracked = trackedShare(from, t) >= c.minTracked
+        if (abs(speed) < if (tracked) c.slowStartSpeed else c.startSpeed) return null
+        val then = at(from) ?: return null
+        if (abs(smoothed - then) < if (tracked) c.slowStartRise else c.startRise) return null
+        if (walked(from, t) > c.maxWalk) return null
+        if (stepsKnown && stepsBetween(from, t) > c.maxSteps) return null
+        if (lastJump >= from) return null
         val start = rideStart(t)
         riding = true
+        noticedAt = t
+        startedAt = start.t
         startAlt = start.v
         rise = smoothed - startAlt
         stillSince = -1L
@@ -97,6 +141,8 @@ class ElevatorDetector(private val c: Config = Config()) {
     }
 
     private fun maybeEnd(t: Long, speed: Float): Event? {
+        val confirming = t - noticedAt <= c.confirmS * 1000
+        if (confirming && (lastJump > noticedAt || stepsKnown && stepsBetween(startedAt, t) > c.maxSteps)) return cancel()
         // Smoothing makes a steady climb lag by speed x smoothing time; add that back while moving.
         rise = smoothed + speed * c.smoothingS - startAlt
         if (abs(speed) >= c.stopSpeed) {
@@ -105,12 +151,20 @@ class ElevatorDetector(private val c: Config = Config()) {
         }
         if (stillSince < 0) stillSince = t
         if (t - stillSince < c.stopHoldS * 1000) return null
-        riding = false
         val total = smoothed - startAlt
-        rise = 0f
         // Stillness shows up a slope window and a smoothing time after the car actually stopped.
         val stoppedAt = stillSince - ((c.slopeWindowS / 2 + c.smoothingS) * 1000).toLong()
-        return if (abs(total) >= c.minRide) Event.RideEnded(total, stoppedAt) else Event.RideCancelled
+        val motion = motionTime(startedAt, t)
+        if (abs(total) < c.minRide || motion != null && motion < c.minMotionS * 1000) return cancel()
+        riding = false
+        rise = 0f
+        return Event.RideEnded(total, stoppedAt)
+    }
+
+    private fun cancel(): Event {
+        riding = false
+        rise = 0f
+        return Event.RideCancelled
     }
 
     /** Going back from now, the last moment the height was still: where the ride began. */
@@ -149,20 +203,89 @@ class ElevatorDetector(private val c: Config = Config()) {
         return history.lastOrNull { it.t <= t }?.v
     }
 
+    /** Whether the raw height leapt by [Config.jumpRise] within [Config.jumpS] after holding still. */
+    private fun jumped(t: Long): Boolean {
+        val jump = (c.jumpS * 1000).toLong()
+        val before = rawMean(t - jump - 1000, t - jump - 500) ?: return false
+        val still = rawMean(t - jump - 500, t - jump) ?: return false
+        val now = rawMean(t - 200, t) ?: return false
+        return abs(still - before) < STILL_PER_SECOND && abs(now - still) > c.jumpRise
+    }
+
+    /** Mean raw altitude after [from] up to [to], or null without samples. */
+    private fun rawMean(from: Long, to: Long): Float? {
+        var n = 0
+        var sum = 0f
+        for (i in raw.indices.reversed()) {
+            val s = raw[i]
+            if (s.t <= from) break
+            if (s.t > to) continue
+            n++
+            sum += s.v
+        }
+        return if (n == 0) null else sum / n
+    }
+
+    /**
+     * How long the raw height took to get from its level before [from] to its level at [to],
+     * leaving out the first and last [MOTION_BAND_M] that noise blurs. Null when the history
+     * doesn't reach back that far, which only happens on long rides.
+     */
+    private fun motionTime(from: Long, to: Long): Long? {
+        if (raw.first().t > from - 1000) return null
+        val before = rawMean(from - 1000, from) ?: return null
+        val after = rawMean(to - 1000, to) ?: return null
+        val sign = if (after > before) 1f else -1f
+        var began = -1L
+        var ended = -1L
+        val recent = ArrayDeque<Sample>()
+        var sum = 0f
+        for (s in raw) {
+            if (s.t <= from) continue
+            recent.addLast(s)
+            sum += s.v
+            while (s.t - recent.first().t >= MOTION_MEAN_MS) sum -= recent.removeFirst().v
+            val level = sum / recent.size
+            if (began < 0 && (level - before) * sign > MOTION_BAND_M) began = s.t
+            if ((after - level) * sign > MOTION_BAND_M) ended = s.t
+        }
+        return if (began < 0) 0 else ended - began
+    }
+
+    /** How far ARCore saw the phone move sideways. A leap is ARCore correcting itself, not walking. */
     private fun walked(from: Long, to: Long): Float {
         var total = 0f
         var prev: Spot? = null
         for (s in spots) {
             if (s.t < from || s.t > to) continue
-            prev?.let { total += hypot(s.x - it.x, s.z - it.z) }
+            prev?.let { p -> hypot(s.x - p.x, s.z - p.z).takeIf { it <= MAX_HOP_M }?.let { total += it } }
             prev = s
         }
         return total
     }
 
+    /** The share of the time from [from] to [to] that ARCore was tracking. */
+    private fun trackedShare(from: Long, to: Long): Float {
+        var covered = 0L
+        var prev: Long? = null
+        for (s in spots) {
+            if (s.t < from || s.t > to) continue
+            prev?.let { p -> (s.t - p).takeIf { it <= MAX_GAP_MS }?.let { covered += it } }
+            prev = s.t
+        }
+        return covered.toFloat() / (to - from)
+    }
+
+    private fun stepsBetween(from: Long, to: Long): Int = steps.count { it in from..to }
+
     private companion object {
         const val KEEP_MS = 30_000L
+        const val MOTION_MEAN_MS = 300L
+        const val MOTION_BAND_M = 0.25f
         const val STILL_PER_SECOND = 0.2f
+        /** A longer gap between ARCore poses means tracking was lost in between. */
+        const val MAX_GAP_MS = 500L
+        const val MAX_HOP_M = 1f
     }
 }
 

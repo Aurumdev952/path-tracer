@@ -47,14 +47,24 @@ abstract class ArActivity : ComponentActivity() {
     private val barometer by lazy { Barometer(this) }
     /** Whether elevator rides can be noticed on this phone. */
     protected val hasBarometer: Boolean get() = wantsBarometer && barometer.available
+    /** Steps tell walking up stairs from riding; without them the barometer still works. */
+    private val stepSensor by lazy { StepSensor(this) }
+    /** Asking again from every onResume would loop after a "no". */
+    private var askedForSteps = false
 
     /** Asks for the sharpest camera image ARCore offers, for taking photos. */
     protected open val wantsSharpImages = false
 
-    private val cameraPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (!granted) blocker.value = "Camera access is needed to see your way."
+    private val permissions =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
+            if (results[Manifest.permission.CAMERA] == false) blocker.value = "Camera access is needed to see your way."
         }
+
+    private fun granted(permission: String) =
+        ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+
+    private fun mayCountSteps() =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || granted(Manifest.permission.ACTIVITY_RECOGNITION)
 
     /** Sets this mode's ARCore options on top of the shared defaults. */
     protected open fun configure(session: Session, config: Config) {}
@@ -100,8 +110,15 @@ abstract class ArActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            cameraPermission.launch(Manifest.permission.CAMERA)
+        val missing = buildList {
+            if (!granted(Manifest.permission.CAMERA)) add(Manifest.permission.CAMERA)
+            if (hasBarometer && stepSensor.available && !askedForSteps && !mayCountSteps()) {
+                add(Manifest.permission.ACTIVITY_RECOGNITION)
+                askedForSteps = true
+            }
+        }
+        if (missing.isNotEmpty()) {
+            permissions.launch(missing.toTypedArray())
             return
         }
         val session = session ?: createSession() ?: return
@@ -115,6 +132,12 @@ abstract class ArActivity : ComponentActivity() {
         if (wantsBarometer) {
             barometer.onAltitude = renderer::pushAltitude
             barometer.start()
+            renderer.stepsKnown = stepSensor.available && mayCountSteps()
+            if (renderer.stepsKnown) {
+                stepSensor.onStep = renderer::pushStep
+                stepSensor.start()
+            }
+            debug?.event("steps", "known" to renderer.stepsKnown)
         }
     }
 
@@ -166,7 +189,10 @@ abstract class ArActivity : ComponentActivity() {
             glView.onPause()
             session?.pause()
         }
-        if (wantsBarometer) barometer.stop()
+        if (wantsBarometer) {
+            barometer.stop()
+            stepSensor.stop()
+        }
         debug?.event("pause")
         debug?.flush()
     }

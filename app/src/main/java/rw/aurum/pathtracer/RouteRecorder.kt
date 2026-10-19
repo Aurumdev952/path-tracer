@@ -240,6 +240,8 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         var frameHint = trackingHint(camera)
 
         if (tracking) elevator.position(SystemClock.elapsedRealtime(), camera.pose.tx(), camera.pose.tz())
+        elevator.stepsKnown = stepsKnown
+        takeSteps(elevator::step)
         takeAltitudes { t, m -> elevator.altitude(t, m)?.let(::onElevator) }
         if (stage is RecordStage.Riding) stage = (stage as RecordStage.Riding).copy(rise = elevatorRise + elevator.rise)
         debug?.show("baro_m", elevator.altitude)
