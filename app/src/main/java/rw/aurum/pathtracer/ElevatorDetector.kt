@@ -60,7 +60,7 @@ class ElevatorDetector(private val c: Config = Config()) {
         /** The elevator stopped. [rise] in meters since the ride began, negative going down. */
         data class RideEnded(val rise: Float, val endedAt: Long) : Event
         /** It wasn't a ride after all. */
-        data object RideCancelled : Event
+        data class RideCancelled(val why: String) : Event
     }
 
     private class Sample(val t: Long, val v: Float)
@@ -142,7 +142,8 @@ class ElevatorDetector(private val c: Config = Config()) {
 
     private fun maybeEnd(t: Long, speed: Float): Event? {
         val confirming = t - noticedAt <= c.confirmS * 1000
-        if (confirming && (lastJump > noticedAt || stepsKnown && stepsBetween(startedAt, t) > c.maxSteps)) return cancel()
+        if (confirming && lastJump > noticedAt) return cancel("pressure jump")
+        if (confirming && stepsKnown && stepsBetween(startedAt, t) > c.maxSteps) return cancel("steps")
         // Smoothing makes a steady climb lag by speed x smoothing time; add that back while moving.
         rise = smoothed + speed * c.smoothingS - startAlt
         if (abs(speed) >= c.stopSpeed) {
@@ -155,16 +156,17 @@ class ElevatorDetector(private val c: Config = Config()) {
         // Stillness shows up a slope window and a smoothing time after the car actually stopped.
         val stoppedAt = stillSince - ((c.slopeWindowS / 2 + c.smoothingS) * 1000).toLong()
         val motion = motionTime(startedAt, t)
-        if (abs(total) < c.minRide || motion != null && motion < c.minMotionS * 1000) return cancel()
+        if (abs(total) < c.minRide) return cancel("too short")
+        if (motion != null && motion < c.minMotionS * 1000) return cancel("too sudden")
         riding = false
         rise = 0f
         return Event.RideEnded(total, stoppedAt)
     }
 
-    private fun cancel(): Event {
+    private fun cancel(why: String): Event {
         riding = false
         rise = 0f
-        return Event.RideCancelled
+        return Event.RideCancelled(why)
     }
 
     /** Going back from now, the last moment the height was still: where the ride began. */

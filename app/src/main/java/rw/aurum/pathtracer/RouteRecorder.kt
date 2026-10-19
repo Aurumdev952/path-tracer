@@ -369,8 +369,8 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
                 floor = guess.orEmpty()
                 stage = RecordStage.Capture(PhotoFor.Elevator(guess.orEmpty()))
             }
-            ElevatorDetector.Event.RideCancelled -> {
-                debug?.event("ride_cancel")
+            is ElevatorDetector.Event.RideCancelled -> {
+                debug?.event("ride_cancel", "why" to e.why)
                 if ((stage as? RecordStage.Riding)?.auto == true && ridingFrom != null) {
                     resumeAfterFalseRide("detector")
                 } else if (stage is RecordStage.Riding) {

@@ -343,7 +343,10 @@ class RouteFollower(route: Route) : ArRenderer() {
                 debug?.event("ride_end", "rise_m" to e.rise, "total_m" to riddenRise, "expected_m" to entry.rise, "check" to check.toString())
                 say(rideMessage(check, entry.floor))
             }
-            ElevatorDetector.Event.RideCancelled -> riding = false
+            is ElevatorDetector.Event.RideCancelled -> {
+                debug?.event("ride_cancel", "why" to e.why)
+                riding = false
+            }
         }
     }
 
