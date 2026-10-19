@@ -1,9 +1,11 @@
 package rw.aurum.pathtracer
 
 import android.graphics.Bitmap
+import android.opengl.Matrix
 import com.google.ar.core.Coordinates2d
 import com.google.ar.core.DepthPoint
 import com.google.ar.core.Frame
+import com.google.ar.core.HitResult
 import com.google.ar.core.Plane
 import com.google.ar.core.Point
 import com.google.ar.core.Pose
@@ -34,42 +36,80 @@ object SignPhoto {
         val side = viewWidth * BOX
         val left = (viewWidth - side) / 2
         val y = viewHeight / 2f
-        fun surface(x: Float, anyPoint: Boolean = false): Pose? = frame.hitTest(x, y).firstOrNull { hit ->
+        fun surface(x: Float, anyPoint: Boolean = false): HitResult? = frame.hitTest(x, y).firstOrNull { hit ->
             when (val t = hit.trackable) {
                 is Plane -> t.isPoseInPolygon(hit.hitPose)
                 is DepthPoint -> true
                 is Point -> anyPoint
                 else -> false
             }
-        }?.hitPose
-        val a = surface(left + side * EDGE)
-        val b = surface(left + side * (1 - EDGE))
+        }
+        val a = surface(left + side * EDGE)?.hitPose
+        val b = surface(left + side * (1 - EDGE))?.hitPose
         val c = surface(viewWidth / 2f)
         if (a != null && b != null && c != null) {
             val across = dist(a, b)
             // The center must sit near the middle of the two edges, or the box spans a corner or a gap.
             val mid = Pose.makeTranslation((a.tx() + b.tx()) / 2, (a.ty() + b.ty()) / 2, (a.tz() + b.tz()) / 2)
             val width = across / (1 - 2 * EDGE)
-            if (dist(c, mid) <= across * 0.15f && width in MIN_WIDTH..MAX_WIDTH) return Size(width, "edges")
+            if (dist(c.hitPose, mid) <= across * 0.15f && width in MIN_WIDTH..MAX_WIDTH) return Size(width, "edges")
         }
         val center = c ?: surface(viewWidth / 2f, anyPoint = true)
         if (center == null) {
             lastFailure = "no surface at the center (edges ${if (a == null) "-" else "ok"}/${if (b == null) "-" else "ok"})"
             return null
         }
+        val camera = frame.camera
+        val view = FloatArray(16)
+        val projection = FloatArray(16)
+        camera.getViewMatrix(view, 0)
+        camera.getProjectionMatrix(projection, 0, 0.05f, 100f)
+
+        // With the surface's direction known, intersect the box's two edge rays with the sign's
+        // plane: right at any angle. Otherwise assume the sign faces the camera.
+        val normal = surfaceNormal(center)
+        if (normal != null) {
+            val toWorld = FloatArray(16).also { inv ->
+                val viewProjection = FloatArray(16)
+                Matrix.multiplyMM(viewProjection, 0, projection, 0, view, 0)
+                Matrix.invertM(inv, 0, viewProjection, 0)
+            }
+            val (oa, da) = ray(toWorld, -BOX)
+            val (ob, db) = ray(toWorld, BOX)
+            val width = spanOnPlane(oa, da, ob, db, center.hitPose.translation, normal)
+            if (width != null && width in MIN_WIDTH..MAX_WIDTH) return Size(width, "plane")
+        }
         // Depth along the camera's view direction, and the view's horizontal focal length from the
         // projection matrix: the box spans BOX of the view, so 2 * BOX * depth / projection[0] meters.
-        val cam = frame.camera.pose
+        val cam = camera.pose
+        val hit = center.hitPose
         val forward = cam.zAxis.map { -it }
-        val depth = (center.tx() - cam.tx()) * forward[0] + (center.ty() - cam.ty()) * forward[1] + (center.tz() - cam.tz()) * forward[2]
-        val projection = FloatArray(16)
-        frame.camera.getProjectionMatrix(projection, 0, 0.05f, 100f)
+        val depth = (hit.tx() - cam.tx()) * forward[0] + (hit.ty() - cam.ty()) * forward[1] + (hit.tz() - cam.tz()) * forward[2]
         val width = 2 * BOX * depth / projection[0]
         if (width !in MIN_WIDTH..MAX_WIDTH) {
             lastFailure = "estimate out of range: %.2f m at %.2f m".format(java.util.Locale.US, width, depth)
             return null
         }
         return Size(width, "center")
+    }
+
+    /** The surface's normal at a hit, when ARCore knows it: walls, floors, depth, some feature points. */
+    private fun surfaceNormal(hit: HitResult): FloatArray? = when (val t = hit.trackable) {
+        is Plane, is DepthPoint -> hit.hitPose.yAxis
+        is Point -> hit.hitPose.yAxis.takeIf { t.orientationMode == Point.OrientationMode.ESTIMATED_SURFACE_NORMAL }
+        else -> null
+    }
+
+    /** The world ray through the view's middle row at normalized x [ndcX]: (origin, direction). */
+    private fun ray(toWorld: FloatArray, ndcX: Float): Pair<FloatArray, FloatArray> {
+        fun unproject(z: Float): FloatArray {
+            val out = FloatArray(4)
+            Matrix.multiplyMV(out, 0, toWorld, 0, floatArrayOf(ndcX, 0f, z, 1f), 0)
+            return floatArrayOf(out[0] / out[3], out[1] / out[3], out[2] / out[3])
+        }
+        val near = unproject(-1f)
+        val far = unproject(1f)
+        return near to floatArrayOf(far[0] - near[0], far[1] - near[1], far[2] - near[2])
     }
 
     /** Why the last [measure] returned null, for the debug log. */
