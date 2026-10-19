@@ -35,6 +35,9 @@ sealed interface RecordStage {
     data class Saved(val routeId: String) : RecordStage
 }
 
+/** "Which floor are you on?" with a [guess] (empty if unknown) and how far the ride went. */
+data class FloorQuestion(val guess: String, val ride: String)
+
 data class RecordUi(
     val stage: RecordStage = RecordStage.Capture(PhotoFor.Start),
     val hint: String? = null,
@@ -43,8 +46,8 @@ data class RecordUi(
     val photos: Int = 0,
     val photo: File? = null,
     val floor: String = "",
-    /** After an elevator ride the barometer noticed: the floor it guessed, for the user to confirm. */
-    val askFloor: String? = null,
+    /** After an elevator ride the barometer noticed: ask which floor this is. */
+    val askFloor: FloorQuestion? = null,
 )
 
 /**
@@ -100,7 +103,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     private var rideStartedAt = 0L
     /** Meters ridden since the last leg ended, over one or more stops of the elevator. */
     private var elevatorRise = 0f
-    private var askFloor: String? = null
+    private var askFloor: FloorQuestion? = null
     /** The floor before the elevator ride, to count floors from. */
     private var rideBaseFloor = ""
     /** The floor the user typed with Floor change → Elevator, which beats any guess. */
@@ -262,9 +265,9 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
                 val typed = manualFloor
                 val guess = typed ?: guessFloor(rideBaseFloor, elevatorRise)
                 debug?.event("ride_end", "rise_m" to e.rise, "total_m" to elevatorRise, "floors" to floorsIn(elevatorRise), "guess" to guess)
-                if (typed == null) askFloor = guess
-                floor = guess
-                stage = RecordStage.Capture(PhotoFor.Elevator(guess))
+                if (typed == null) askFloor = FloorQuestion(guess.orEmpty(), rideSummary(elevatorRise))
+                floor = guess.orEmpty()
+                stage = RecordStage.Capture(PhotoFor.Elevator(guess.orEmpty()))
             }
             ElevatorDetector.Event.RideCancelled -> {
                 debug?.event("ride_cancel")
