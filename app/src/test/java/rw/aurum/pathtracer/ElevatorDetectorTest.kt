@@ -75,7 +75,7 @@ class ElevatorDetectorTest {
         trace.go(8f)
         val ended = trace.run(ElevatorDetector()).last().second as ElevatorDetector.Event.RideEnded
         assertEquals(-19f, ended.rise, 1.5f)
-        assertEquals("B6", guessFloor("", ended.rise))
+        assertEquals("B4", guessFloor("2", ended.rise))
     }
 
     @Test fun aSlowElevatorStillCounts() {
@@ -157,6 +157,13 @@ class ElevatorDetectorTest {
         assertEquals("Not yet. Stay in for about 9 floors, to floor 15", rideMessage(RideCheck.NotYet(9), "15"))
         assertEquals("This is floor 15. Step out and point your camera at the sign in the photo", rideMessage(RideCheck.Arrived, "15"))
         assertEquals("You went about 1 floor too far. Go back to floor 15", rideMessage(RideCheck.TooFar(1), "15"))
+    }
+
+    @Test fun doesNotInventAFloorWhenTheStartFloorIsUnknown() {
+        assertNull(guessFloor("", -33.3f))
+        assertEquals("2", guessFloor("12", -33.3f))
+        assertEquals("about 10 floors down", rideSummary(-33.3f))
+        assertEquals("about 1 floor up", rideSummary(3.4f))
     }
 
     @Test fun guessesFloors() {
