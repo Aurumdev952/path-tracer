@@ -200,8 +200,13 @@ class GuideTest {
         return out
     }
 
-    // Along a corridor, down a flight of stairs (4 m lower), and back under the corridor, 1.5 m to the side.
+    // Along a corridor, down a flight of stairs (4 m lower), then right along the floor below.
     private val downstairs = walk3(
+        Triple(0f, 0f, 0f), Triple(0f, 0f, -20f), Triple(1.5f, -4f, -26f), Triple(12f, -4f, -26f),
+    )
+
+    // As above, but the floor below leads back under the corridor, 1.5 m to the side.
+    private val underCorridor = walk3(
         Triple(0f, 0f, 0f), Triple(0f, 0f, -20f), Triple(1.5f, -4f, -26f), Triple(1.5f, -4f, -6f),
     )
 
@@ -209,8 +214,7 @@ class GuideTest {
         val nav = Navigator(route(leg(downstairs)))
         // The follower walks the same way seen from above, but never takes the stairs.
         var g = nav.update(TrailPoint(0f, 0f, 0f))
-        for (z in 0 downTo -20) g = nav.update(TrailPoint(0f, 0f, z.toFloat()))
-        for (z in -20..-6) g = nav.update(TrailPoint(1.5f, 0f, z.toFloat()))
+        for (p in downstairs.filterIndexed { i, _ -> i % 10 == 0 } + downstairs.last()) g = nav.update(TrailPoint(p.x, 0f, p.z))
 
         assertFalse(nav.atStretchEnd(g))
         assertTrue(g.offRoute)
@@ -218,7 +222,7 @@ class GuideTest {
     }
 
     @Test fun findsTheFollowerOnTheirOwnFloorWhereTheRoutePassesTwice() {
-        val path = Path(downstairs)
+        val path = Path(underCorridor)
         // Downstairs, under the start of the corridor: the lower pass, not the corridor overhead.
         val fix = path.locate(TrailPoint(1.5f, -4f, -10f), near = 0f)
         assertTrue("located at ${fix.s}", fix.s > 26f)
