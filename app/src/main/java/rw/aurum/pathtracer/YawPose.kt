@@ -56,3 +56,22 @@ fun spanOnPlane(oa: FloatArray, da: FloatArray, ob: FloatArray, db: FloatArray, 
 
 /** cos(75 degrees): rays closer to the plane than this give unreliable widths. */
 private const val GRAZING = 0.26f
+
+/**
+ * The average of [poses] when they agree: every position within [maxShift] meters of the average
+ * and every heading within [maxTurn] radians of it. Null when they don't, or there are none.
+ */
+fun steadyPose(poses: List<YawPose>, maxShift: Float, maxTurn: Float): YawPose? {
+    if (poses.isEmpty()) return null
+    val x = poses.map { it.x }.average().toFloat()
+    val y = poses.map { it.y }.average().toFloat()
+    val z = poses.map { it.z }.average().toFloat()
+    val yaw = kotlin.math.atan2(poses.sumOf { sin(it.yaw).toDouble() }, poses.sumOf { cos(it.yaw).toDouble() }).toFloat()
+    val mean = YawPose(x, y, z, yaw)
+    val steady = poses.all { p ->
+        val turn = kotlin.math.atan2(sin(p.yaw - yaw), cos(p.yaw - yaw))
+        kotlin.math.abs(turn) <= maxTurn &&
+            kotlin.math.sqrt((p.x - x) * (p.x - x) + (p.y - y) * (p.y - y) + (p.z - z) * (p.z - z)) <= maxShift
+    }
+    return mean.takeIf { steady }
+}

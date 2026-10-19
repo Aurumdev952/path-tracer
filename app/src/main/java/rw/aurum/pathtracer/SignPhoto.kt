@@ -1,6 +1,7 @@
 package rw.aurum.pathtracer
 
 import android.graphics.Bitmap
+import android.media.Image
 import android.opengl.Matrix
 import com.google.ar.core.Coordinates2d
 import com.google.ar.core.DepthPoint
@@ -23,8 +24,15 @@ object SignPhoto {
     private const val MIN_WIDTH = 0.05f
     private const val MAX_WIDTH = 4f
 
-    /** The real width the framing box covers, and how it was found ("edges" or "center"). */
-    data class Size(val width: Float, val how: String)
+    /**
+     * The real width the framing box covers, how it was found ("edges", "plane" or "center"), and,
+     * when the sign's surface is known, a square of that width lying on it (corners top-left,
+     * top-right, bottom-right, bottom-left).
+     */
+    class Size(val width: Float, val how: String, val square: FloatArray? = null)
+
+    /** A sign photo and the real width it shows. [view] is "straight" when the angle was undone. */
+    class Shot(val bitmap: Bitmap, val width: Float, val view: String)
 
     /**
      * Measures the real width of what the framing box covers, in meters. First from the surface
@@ -52,7 +60,10 @@ object SignPhoto {
             // The center must sit near the middle of the two edges, or the box spans a corner or a gap.
             val mid = Pose.makeTranslation((a.tx() + b.tx()) / 2, (a.ty() + b.ty()) / 2, (a.tz() + b.tz()) / 2)
             val width = across / (1 - 2 * EDGE)
-            if (dist(c.hitPose, mid) <= across * 0.15f && width in MIN_WIDTH..MAX_WIDTH) return Size(width, "edges")
+            if (dist(c.hitPose, mid) <= across * 0.15f && width in MIN_WIDTH..MAX_WIDTH) {
+                val normal = surfaceNormal(c)
+                return Size(width, "edges", normal?.let { square(frame, mid.translation, it, width) })
+            }
         }
         val center = c ?: surface(viewWidth / 2f, anyPoint = true)
         if (center == null) {
@@ -77,7 +88,9 @@ object SignPhoto {
             val (oa, da) = ray(toWorld, -BOX)
             val (ob, db) = ray(toWorld, BOX)
             val width = spanOnPlane(oa, da, ob, db, center.hitPose.translation, normal)
-            if (width != null && width in MIN_WIDTH..MAX_WIDTH) return Size(width, "plane")
+            if (width != null && width in MIN_WIDTH..MAX_WIDTH) {
+                return Size(width, "plane", square(frame, center.hitPose.translation, normal, width))
+            }
         }
         // Depth along the camera's view direction, and the view's horizontal focal length from the
         // projection matrix: the box spans BOX of the view, so 2 * BOX * depth / projection[0] meters.
@@ -91,6 +104,11 @@ object SignPhoto {
             return null
         }
         return Size(width, "center")
+    }
+
+    private fun square(frame: Frame, center: FloatArray, normal: FloatArray, width: Float): FloatArray? {
+        val camera = frame.camera
+        return squareOnPlane(center, normal, width, floatArrayOf(0f, 1f, 0f), camera.displayOrientedPose.yAxis, camera.pose.translation)
     }
 
     /** The surface's normal at a hit, when ARCore knows it: walls, floors, depth, some feature points. */
@@ -170,50 +188,136 @@ object SignPhoto {
         }
     }
 
-    /** Returns null when no camera image is ready yet; try again on the next frame. */
-    fun capture(frame: Frame, viewWidth: Int, viewHeight: Int): Bitmap? {
+    /**
+     * Takes the photo for [size]. When the sign's surface is known the photo is taken straight on,
+     * as if standing right in front of the sign, so ARCore matches it from any side. Returns null
+     * when no camera image is ready yet; try again on the next frame.
+     */
+    fun capture(frame: Frame, viewWidth: Int, viewHeight: Int, size: Size): Shot? {
         val image = try {
             frame.acquireCameraImage()
         } catch (e: NotYetAvailableException) {
             return null
         }
         image.use {
+            size.square?.let { square -> straightOn(frame, image, size, square)?.let { return it } }
             val (ox, oy, ux, uy, vx, vy) = boxInImage(frame, viewWidth, viewHeight)
             val scale = minOf(1f, MAX_SIDE / max(hypot(ux, uy), hypot(vx, vy)))
             val w = (hypot(ux, uy) * scale).roundToInt().coerceAtLeast(1)
             val h = (hypot(vx, vy) * scale).roundToInt().coerceAtLeast(1)
-
-            val yPlane = image.planes[0]
-            val uPlane = image.planes[1]
-            val vPlane = image.planes[2]
-            val yBuf = yPlane.buffer
-            val uBuf = uPlane.buffer
-            val vBuf = vPlane.buffer
-            val yRow = yPlane.rowStride
-            val yPix = yPlane.pixelStride
-            val uvRow = uPlane.rowStride
-            val uvPix = uPlane.pixelStride
-            val maxX = image.width - 1
-            val maxY = image.height - 1
-
-            val pixels = IntArray(w * h)
-            for (j in 0 until h) {
-                val fy = (j + 0.5f) / h
-                for (i in 0 until w) {
-                    val fx = (i + 0.5f) / w
-                    val ix = (ox + ux * fx + vx * fy).toInt().coerceIn(0, maxX)
-                    val iy = (oy + uy * fx + vy * fy).toInt().coerceIn(0, maxY)
-                    val lum = yBuf.get(iy * yRow + ix * yPix).toInt() and 0xff
-                    val uvIndex = (iy / 2) * uvRow + (ix / 2) * uvPix
-                    val cb = (uBuf.get(uvIndex).toInt() and 0xff) - 128
-                    val cr = (vBuf.get(uvIndex).toInt() and 0xff) - 128
-                    val r = (lum + 1.402f * cr).toInt().coerceIn(0, 255)
-                    val g = (lum - 0.344f * cb - 0.714f * cr).toInt().coerceIn(0, 255)
-                    val b = (lum + 1.772f * cb).toInt().coerceIn(0, 255)
-                    pixels[j * w + i] = (0xff shl 24) or (r shl 16) or (g shl 8) or b
-                }
+            val bitmap = sample(image, w, h) { fx, fy, out ->
+                out[0] = ox + ux * fx + vx * fy
+                out[1] = oy + uy * fx + vy * fy
             }
-            return Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888)
+            return Shot(bitmap, size.width, "box")
         }
     }
+
+    /** Why the last photo couldn't be taken straight on, for the debug log. */
+    var lastStraightFailure: String = ""
+        private set
+
+    private fun straightOn(frame: Frame, image: Image, size: Size, square: FloatArray): Shot? {
+        val camera = frame.camera
+        val intrinsics = camera.imageIntrinsics
+        val (fx, fy) = intrinsics.focalLength
+        val (cx, cy) = intrinsics.principalPoint
+        val dims = intrinsics.imageDimensions
+        // Intrinsics are for the camera config's image size; scale them if the image differs.
+        val sx = image.width.toFloat() / dims[0]
+        val sy = image.height.toFloat() / dims[1]
+        val toCamera = FloatArray(16)
+        camera.pose.inverse().toMatrix(toCamera, 0)
+        fun project(p: FloatArray) = projectToImage(toCamera, fx * sx, fy * sy, cx * sx, cy * sy, p)
+
+        // The same points through the screen's view and projection and ARCore's own screen-to-image
+        // mapping. The two ways must agree, or the photo could come out turned or mirrored.
+        val viewProjection = FloatArray(16).also { vp ->
+            val view = FloatArray(16)
+            val projection = FloatArray(16)
+            camera.getViewMatrix(view, 0)
+            camera.getProjectionMatrix(projection, 0, 0.05f, 100f)
+            Matrix.multiplyMM(vp, 0, projection, 0, view, 0)
+        }
+        fun viaScreen(p: FloatArray): FloatArray {
+            val clip = FloatArray(4)
+            Matrix.multiplyMV(clip, 0, viewProjection, 0, floatArrayOf(p[0], p[1], p[2], 1f), 0)
+            val normalized = floatArrayOf((clip[0] / clip[3] + 1) / 2, (1 - clip[1] / clip[3]) / 2)
+            val px = FloatArray(2)
+            frame.transformCoordinates2d(Coordinates2d.VIEW_NORMALIZED, normalized, Coordinates2d.IMAGE_PIXELS, px)
+            return px
+        }
+        val worst = (0 until 4).maxOf { i ->
+            val corner = FloatArray(3) { k -> square[3 * i + k] }
+            val a = project(corner) ?: return null.also { lastStraightFailure = "sign behind the camera" }
+            val b = viaScreen(corner)
+            hypot(a[0] - b[0], a[1] - b[1])
+        }
+        if (worst > image.width * PROJECTION_TOLERANCE) {
+            lastStraightFailure = "projections disagree by ${worst.roundToInt()} px"
+            return null
+        }
+
+        // Shrink the square about its middle until all of it is in the camera image.
+        val middle = FloatArray(3) { k -> (square[k] + square[3 + k] + square[6 + k] + square[9 + k]) / 4 }
+        var shrink = 1f
+        repeat(SHRINK_STEPS) {
+            val quad = FloatArray(8)
+            val inside = (0 until 4).all { i ->
+                val corner = FloatArray(3) { k -> middle[k] + (square[3 * i + k] - middle[k]) * shrink }
+                val px = project(corner) ?: return@all false
+                px.copyInto(quad, 2 * i)
+                px[0] in 0f..(image.width - 1f) && px[1] in 0f..(image.height - 1f)
+            }
+            if (inside) {
+                val homography = Homography.squareTo(quad) ?: return null
+                val edge = (0 until 4).maxOf { i -> hypot(quad[(2 * i + 2) % 8] - quad[2 * i], quad[(2 * i + 3) % 8] - quad[2 * i + 1]) }
+                val n = edge.roundToInt().coerceIn(MIN_STRAIGHT_SIDE, MAX_SIDE)
+                return Shot(sample(image, n, n, homography::map), size.width * shrink, "straight")
+            }
+            shrink *= 0.9f
+        }
+        lastStraightFailure = "sign doesn't fit in the camera image"
+        return null
+    }
+
+    /** Builds a [w] x [h] picture; [at] gives the camera image pixel for each point across it (0 to 1). */
+    private inline fun sample(image: Image, w: Int, h: Int, at: (Float, Float, FloatArray) -> Unit): Bitmap {
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+        val yBuf = yPlane.buffer
+        val uBuf = uPlane.buffer
+        val vBuf = vPlane.buffer
+        val yRow = yPlane.rowStride
+        val yPix = yPlane.pixelStride
+        val uvRow = uPlane.rowStride
+        val uvPix = uPlane.pixelStride
+        val maxX = image.width - 1
+        val maxY = image.height - 1
+        val point = FloatArray(2)
+
+        val pixels = IntArray(w * h)
+        for (j in 0 until h) {
+            val fy = (j + 0.5f) / h
+            for (i in 0 until w) {
+                at((i + 0.5f) / w, fy, point)
+                val ix = point[0].toInt().coerceIn(0, maxX)
+                val iy = point[1].toInt().coerceIn(0, maxY)
+                val lum = yBuf.get(iy * yRow + ix * yPix).toInt() and 0xff
+                val uvIndex = (iy / 2) * uvRow + (ix / 2) * uvPix
+                val cb = (uBuf.get(uvIndex).toInt() and 0xff) - 128
+                val cr = (vBuf.get(uvIndex).toInt() and 0xff) - 128
+                val r = (lum + 1.402f * cr).toInt().coerceIn(0, 255)
+                val g = (lum - 0.344f * cb - 0.714f * cr).toInt().coerceIn(0, 255)
+                val b = (lum + 1.772f * cb).toInt().coerceIn(0, 255)
+                pixels[j * w + i] = (0xff shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        }
+        return Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888)
+    }
+
+    private const val PROJECTION_TOLERANCE = 0.02f
+    private const val SHRINK_STEPS = 6
+    private const val MIN_STRAIGHT_SIDE = 300
 }

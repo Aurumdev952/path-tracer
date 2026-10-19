@@ -101,6 +101,9 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     private var pendingPhoto: String? = null
     private var attempts = 0
     private var lockFrames = 0
+    /** The photo's pose over the last frames it was tracked in a row, to start the leg from a steady one. */
+    private val lockPoses = ArrayDeque<YawPose>()
+    private var firstSeenAt = 0L
     private var lockStartedAt = 0L
     private var hint: String? = null
     private var hintUntil = 0L
@@ -386,7 +389,8 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             debug?.event("photo_unmeasured", "why" to SignPhoto.lastFailure)
             return
         }
-        val bitmap = SignPhoto.capture(frame, width, height) ?: return
+        val shot = SignPhoto.capture(frame, width, height, size) ?: return
+        val bitmap = shot.bitmap
         captureRequested = false
         val measureFrames = measureTries
         measureTries = 0
@@ -394,7 +398,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         val db = AugmentedImageDatabase(session)
         val index = legs.size + if (current != null) 1 else 0
         val imageName = "leg${index}_${attempts++}"
-        val measured = size.width
+        val measured = shot.width
         try {
             db.addImage(imageName, bitmap, measured)
         } catch (e: ImageInsufficientQualityException) {
@@ -404,7 +408,8 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         }
         debug?.event(
             "photo", "leg" to index, "size" to "${bitmap.width}x${bitmap.height}", "measured_m" to measured,
-            "how" to size.how, "after_frames" to measureFrames, "for" to s.reason.javaClass.simpleName.lowercase(),
+            "how" to size.how, "view" to shot.view, "after_frames" to measureFrames, "for" to s.reason.javaClass.simpleName.lowercase(),
+            "not_straight" to SignPhoto.lastStraightFailure.takeIf { size.square != null && shot.view != "straight" },
             *detailFields(),
         )
         debug?.show("measured", measured)
@@ -414,6 +419,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         pendingImage = imageName
         pendingPhoto = photo
         lockFrames = 0
+        lockPoses.clear()
         lockStartedAt = SystemClock.elapsedRealtime()
         seen = ImageSeen.None
         hint = null
@@ -441,16 +447,28 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             it.trackingState == TrackingState.TRACKING && it.trackingMethod == AugmentedImage.TrackingMethod.FULL_TRACKING
         }
         if (image == null) {
+            lockPoses.clear()
             if (!s.slow && SystemClock.elapsedRealtime() - lockStartedAt > SLOW_LOCK_MS) {
                 stage = s.copy(slow = true)
                 debug?.event("lock_slow", "seen_frames" to lockFrames)
             }
             return null
         }
-        if (lockFrames == 0) debug?.event("photo_seen", "after_ms" to SystemClock.elapsedRealtime() - lockStartedAt)
-        if (++lockFrames < LOCK_FRAMES) return null
-
-        val pose = levelled(image.centerPose)
+        val now = SystemClock.elapsedRealtime()
+        if (lockFrames == 0) {
+            debug?.event("photo_seen", "after_ms" to now - lockStartedAt)
+            firstSeenAt = now
+        }
+        lockFrames++
+        lockPoses.addLast(levelled(image.centerPose).toYawPose())
+        while (lockPoses.size > LOCK_FRAMES) lockPoses.removeFirst()
+        if (lockPoses.size < LOCK_FRAMES) return null
+        // The whole route's heading comes from this pose, so wait for ARCore to settle on one,
+        // but not for ever: after a while a slightly shaky average is better than no route.
+        val steady = steadyPose(lockPoses, STEADY_SHIFT, STEADY_TURN)
+        val patient = now - firstSeenAt < STEADY_WAIT_MS
+        if (steady == null && patient) return null
+        val pose = (steady ?: steadyPose(lockPoses, Float.MAX_VALUE, Float.MAX_VALUE)!!).toPose()
         val anchor = session.createAnchor(pose)
         val previous = current
         val entry = when (val reason = s.reason) {
@@ -476,6 +494,8 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             "locked",
             "leg" to legs.size,
             "after_ms" to SystemClock.elapsedRealtime() - lockStartedAt,
+            "frames" to lockFrames,
+            "steady" to (steady != null),
             "width_m" to image.extentX,
             "entry" to entry.javaClass.simpleName.lowercase(),
             "offset" to (entry as? LegEntry.Checkpoint)?.fromPrevious?.let { "%.2f,%.2f,%.2f,%.1fdeg".format(java.util.Locale.US, it.x, it.y, it.z, Math.toDegrees(it.yaw.toDouble())) },
@@ -528,6 +548,9 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     private companion object {
         const val STEP_METERS = 0.12f
         const val LOCK_FRAMES = 6
+        const val STEADY_SHIFT = 0.02f
+        val STEADY_TURN = Math.toRadians(1.0).toFloat()
+        const val STEADY_WAIT_MS = 3000L
         /** About a second of frames to find the sign's size before giving up. */
         const val MEASURE_TRIES = 30
         /** Points from the last moments before a ride are usually already inside the elevator. */
