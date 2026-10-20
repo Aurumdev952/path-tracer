@@ -1,6 +1,7 @@
 package rw.aurum.pathtracer
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.os.SystemClock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -25,6 +26,13 @@ class DebugLog(dir: File, mode: String) {
     /** The latest value of everything passed to [show], in first-shown order. */
     val live: StateFlow<List<Pair<String, String>>> = _live
     private var lastPublish = 0L
+
+    /** Saves [bitmap] next to this log as `<log name>-<name>.jpg` and returns that file name. */
+    fun saveImage(name: String, bitmap: Bitmap): String {
+        val image = File(file.parentFile, "${file.nameWithoutExtension}-$name.jpg")
+        image.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+        return image.name
+    }
 
     /** Seconds since the session started, for comparing events. */
     val seconds: Float get() = (SystemClock.elapsedRealtime() - start) / 1000f
@@ -85,9 +93,15 @@ class DebugLog(dir: File, mode: String) {
         fun logs(context: Context): List<File> =
             (dir(context).listFiles() ?: emptyArray()).filter { it.name.endsWith(".log") }.sortedByDescending { it.name }
 
-        /** Starts a new session log, keeping only the most recent ones. */
+        /** Images saved with [saveImage], whichever log they belong to. */
+        private fun images(context: Context): List<File> =
+            (dir(context).listFiles() ?: emptyArray()).filter { it.name.endsWith(".jpg") }
+
+        /** Starts a new session log, keeping only the most recent ones and their images. */
         fun open(context: Context, mode: String): DebugLog {
             logs(context).drop(KEEP - 1).forEach { it.delete() }
+            val kept = logs(context).map { it.nameWithoutExtension }
+            images(context).filter { image -> kept.none { image.name.startsWith("$it-") } }.forEach { it.delete() }
             return DebugLog(dir(context), mode)
         }
 
@@ -99,7 +113,7 @@ class DebugLog(dir: File, mode: String) {
         fun zipAll(context: Context, out: File) {
             out.parentFile?.mkdirs()
             ZipOutputStream(out.outputStream().buffered()).use { zip ->
-                logs(context).forEach { log ->
+                (logs(context) + images(context)).forEach { log ->
                     zip.putNextEntry(ZipEntry(log.name))
                     log.inputStream().use { it.copyTo(zip) }
                     zip.closeEntry()
