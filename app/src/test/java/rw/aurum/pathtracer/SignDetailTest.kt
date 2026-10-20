@@ -66,6 +66,9 @@ class SignDetailTest {
         // Measuring is the one that stops a photo, so it's named before plainness.
         assertTrue(captureStatus(SignDetail.Level.Weak, dark = false, measurable = false)!!.text.startsWith("Can't tell how far"))
         assertNull(captureStatus(null, dark = false, measurable = true))
+        // 16 cm of wall, as in the field: findable only from right in front of it.
+        assertTrue(captureStatus(good, dark = false, measurable = true, span = 0.16f)!!.text.startsWith("Step back"))
+        assertTrue(captureStatus(good, dark = false, measurable = true, span = 0.8f)!!.good)
     }
 
     @Test fun lockStatusFollowsWhatARCoreSees() {

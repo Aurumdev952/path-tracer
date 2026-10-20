@@ -119,6 +119,8 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
 
     /** Live checks while framing a photo: can the sign be measured, and how much detail it has. */
     private var measurable: Boolean? = null
+    /** How much of the wall the box covers, in meters, when it can be measured. */
+    private var span: Float? = null
     private var detail: SignDetail.Result? = null
     private var seen = ImageSeen.None
     /** The photo just locked on to, outlined for a moment so the user sees which sign it was. */
@@ -303,9 +305,11 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     private fun checkSign(frame: Frame, tracking: Boolean) {
         when (frameCount % CHECK_EVERY) {
             0L -> {
-                val ok = if (tracking) SignPhoto.measure(frame, width, height) != null else null
+                val size = if (tracking) SignPhoto.measure(frame, width, height) else null
+                val ok = if (tracking) size != null else null
                 if (ok != measurable) debug?.event("ready", "measurable" to ok, "why" to SignPhoto.lastFailure.takeIf { ok == false })
                 measurable = ok
+                span = size?.width
             }
             CHECK_EVERY / 2L -> SignPhoto.grayBox(frame, width, height, SignDetail.SIDE)?.let { gray ->
                 val r = SignDetail.analyze(gray, SignDetail.SIDE)
@@ -319,6 +323,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     private fun forgetSignChecks() {
         if (measurable == null && detail == null) return
         measurable = null
+        span = null
         detail = null
         _corners.value = FloatArray(0)
     }
@@ -426,7 +431,12 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             db.addImage(imageName, bitmap, measured)
         } catch (e: ImageInsufficientQualityException) {
             notice("Not enough detail in that photo. Try a sign with text or a picture")
-            debug?.event("photo_rejected", "leg" to index, "size" to "${bitmap.width}x${bitmap.height}", "measured_m" to measured, *detailFields())
+            debug?.let { d ->
+                d.event(
+                    "photo_rejected", "leg" to index, "size" to "${bitmap.width}x${bitmap.height}", "measured_m" to measured,
+                    "how" to size.how, "view" to shot.view, "saved" to d.saveImage("rejected-$imageName", bitmap), *detailFields(),
+                )
+            }
             return
         }
         debug?.event(
@@ -546,7 +556,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             floor = floor,
             askFloor = askFloor,
             status = when (stage) {
-                is RecordStage.Capture -> captureStatus(detail?.level, detail?.dark == true, measurable)
+                is RecordStage.Capture -> captureStatus(detail?.level, detail?.dark == true, measurable, span)
                 is RecordStage.Locking -> lockStatus(seen, SystemClock.elapsedRealtime() - lockStartedAt)
                 else -> null
             },

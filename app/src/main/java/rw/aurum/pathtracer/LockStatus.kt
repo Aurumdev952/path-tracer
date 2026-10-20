@@ -14,11 +14,14 @@ data class SignStatus(val text: String, val good: Boolean)
 /**
  * Before the photo: is what's in the box good to photograph? Null until the first checks are in.
  * [measurable] is whether the sign's real size can be measured from here, which every photo
- * needs before ARCore can lock on to it.
+ * needs before ARCore can lock on to it; [span] is how much of the wall the box covers, in meters.
  */
-fun captureStatus(detail: SignDetail.Level?, dark: Boolean, measurable: Boolean?): SignStatus? = when {
+fun captureStatus(detail: SignDetail.Level?, dark: Boolean, measurable: Boolean?, span: Float? = null): SignStatus? = when {
     dark -> SignStatus("Too dark. Turn on a light or pick a brighter sign", false)
     measurable == false -> SignStatus("Can't tell how far the sign is. Step closer and move the phone a little", false)
+    // ARCore only finds a photo that fills about a quarter of the camera view, so a photo of a
+    // few centimeters of wall can only be found from right in front of it.
+    span != null && span < MIN_SPAN_M -> SignStatus("Step back a little. A bigger view is easier to find later", false)
     detail == SignDetail.Level.Weak -> SignStatus("Too plain. Pick a sign with more text or pictures", false)
     measurable == true && detail != null -> SignStatus("Ready. Tap the button", true)
     else -> null
@@ -36,3 +39,4 @@ fun lockStatus(seen: ImageSeen, waitedMs: Long): SignStatus = when (seen) {
 }
 
 private const val NOT_FOUND_MS = 4000L
+private const val MIN_SPAN_M = 0.3f
