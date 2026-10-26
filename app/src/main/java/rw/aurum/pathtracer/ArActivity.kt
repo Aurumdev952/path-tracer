@@ -49,6 +49,7 @@ abstract class ArActivity : ComponentActivity() {
     protected val hasBarometer: Boolean get() = wantsBarometer && barometer.available
     /** Steps tell walking up stairs from riding; without them the barometer still works. */
     private val stepSensor by lazy { StepSensor(this) }
+    private val magnetSensor by lazy { MagnetSensor(this) }
     /** Asking again from every onResume would loop after a "no". */
     private var askedForSteps = false
 
@@ -129,6 +130,10 @@ abstract class ArActivity : ComponentActivity() {
             return
         }
         glView.onResume()
+        if (debug != null) {
+            magnetSensor.onField = renderer::pushField
+            magnetSensor.start()
+        }
         if (wantsBarometer) {
             barometer.onAltitude = renderer::pushAltitude
             barometer.start()
@@ -193,6 +198,7 @@ abstract class ArActivity : ComponentActivity() {
             barometer.stop()
             stepSensor.stop()
         }
+        magnetSensor.stop()
         debug?.event("pause")
         debug?.flush()
     }
