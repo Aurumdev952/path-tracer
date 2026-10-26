@@ -76,8 +76,12 @@ class RouteFollower(route: Route) : ArRenderer() {
     /** While still near the photo just found: what ARCore saw of it, averaged into the anchor. */
     private val settle = ArrayDeque<YawPose>()
     private var settleLeg = -1
+    /** The views in [settle] took their heading from the wall behind the photo. */
+    private var settleOnWall = false
     private var foundFrom: Pose? = null
     private var progress = 0f
+    /** Where the magnetic field was last logged, in the stretch's frame. */
+    private var fieldAt: TrailPoint? = null
     private var lastSnapFrame = 0L
     private var frameCount = 0L
     private var buzz = 0
@@ -208,11 +212,12 @@ class RouteFollower(route: Route) : ArRenderer() {
             val stretchIndex = navigator.stretchOf(leg)
             if (stretchIndex < minStretch) continue
             val inStretch = navigator.stretches[stretchIndex].images.first { it.leg == leg }.pose
-            val world = levelled(image.centerPose).compose(inStretch.inverse().toPose())
+            val sign = signPose(session, image)
+            val world = sign.pose.compose(inStretch.inverse().toPose())
             val cam = frame.camera.pose
 
             if (stretchIndex != navigator.stretch || stage != FollowStage.Guiding) {
-                debug?.event("found", "leg" to leg, "stretch" to stretchIndex, "after_ms" to SystemClock.elapsedRealtime() - searchStartedAt)
+                debug?.event("found", "leg" to leg, "stretch" to stretchIndex, "after_ms" to SystemClock.elapsedRealtime() - searchStartedAt, "wall" to sign.onWall)
                 navigator.lockOn(leg)
                 riddenRise = 0f
                 rideCheck = null
@@ -222,6 +227,7 @@ class RouteFollower(route: Route) : ArRenderer() {
                 stage = FollowStage.Guiding
                 settle.clear()
                 settle += world.toYawPose()
+                settleOnWall = sign.onWall
                 settleLeg = leg
                 foundFrom = cam
                 place(session, world, stretchIndex, leg)
@@ -231,6 +237,12 @@ class RouteFollower(route: Route) : ArRenderer() {
             val from = foundFrom
             val near = from != null && hypot(cam.tx() - from.tx(), cam.tz() - from.tz()) < SETTLE_METERS
             if (leg == settleLeg && near) {
+                // Once the wall is found, only views lined up with it count.
+                if (settleOnWall && !sign.onWall) continue
+                if (sign.onWall && !settleOnWall) {
+                    settle.clear()
+                    settleOnWall = true
+                }
                 settle += world.toYawPose()
                 if (settle.size > SETTLE_VIEWS) settle.removeFirst()
                 val mean = steadyPose(settle, Float.MAX_VALUE, Float.MAX_VALUE)!!.toPose()
@@ -238,7 +250,7 @@ class RouteFollower(route: Route) : ArRenderer() {
                     val was = anchor?.pose
                     val drift = was?.let { hypot(hypot(mean.tx() - it.tx(), mean.ty() - it.ty()), mean.tz() - it.tz()) }
                     val turn = was?.let { Math.toDegrees((mean.toYawPose().yaw - it.toYawPose().yaw).toDouble()) }
-                    d.event("snap", "leg" to leg, "views" to settle.size, "drift_m" to drift, "turn_deg" to turn)
+                    d.event("snap", "leg" to leg, "views" to settle.size, "wall" to settleOnWall, "drift_m" to drift, "turn_deg" to turn)
                 }
                 place(session, mean, stretchIndex, leg)
             } else {
@@ -266,6 +278,8 @@ class RouteFollower(route: Route) : ArRenderer() {
         val photo = TrailPoint(at.x, at.y, at.z)
         aligner = RouteAligner(stretch.path).also { it.landmark(leg, photo, photo) }
         progress = stretch.path.distanceAt(stretch.legStarts[image])
+        fieldAt = null
+        takeField()
         lastSnapFrame = frameCount
     }
 
@@ -293,8 +307,14 @@ class RouteFollower(route: Route) : ArRenderer() {
             )
         }
         val fit = aligner?.fit ?: YawPose.Identity
-        val g = navigator.update(fit.apply(here))
+        val onRoute = fit.apply(here)
+        val g = navigator.update(onRoute)
         progress = g.progress
+        debug?.let { d ->
+            if (fieldAt?.let { onRoute.distanceTo(it) < FIELD_METERS } == true) return@let
+            fieldAt = onRoute
+            takeField()?.let { d.event("field", "stretch" to navigator.stretch, "s" to g.progress, "x" to onRoute.x, "z" to onRoute.z, "ut" to it) }
+        }
 
         // Buzz and speak once when each turn, floor change or end comes within reach. Also speak
         // when a new instruction comes up, e.g. "Go straight" after a turn.
@@ -482,6 +502,7 @@ class RouteFollower(route: Route) : ArRenderer() {
         /** Views of the photo are averaged while the follower is this close to where they found it. */
         const val SETTLE_METERS = 1.5f
         const val SETTLE_VIEWS = 30
+        const val FIELD_METERS = 0.5f
         val ARROW_ANGLE = Math.toRadians(35.0).toFloat()
     }
 }

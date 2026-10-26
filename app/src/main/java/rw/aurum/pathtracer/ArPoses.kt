@@ -1,11 +1,13 @@
 package rw.aurum.pathtracer
 
 import com.google.ar.core.Anchor
+import com.google.ar.core.AugmentedImage
 import com.google.ar.core.Camera
 import com.google.ar.core.Plane
 import com.google.ar.core.Pose
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
@@ -24,6 +26,34 @@ fun YawPose.toPose() = Pose(floatArrayOf(x, y, z), floatArrayOf(0f, sin(yaw / 2)
 
 /** Reads an upright pose; any tilt is dropped. */
 fun Pose.toYawPose() = YawPose(tx(), ty(), tz(), 2 * atan2(qy(), qw()))
+
+/** A sign's upright pose, and whether its heading came from the wall it hangs on. */
+class SignPose(val pose: Pose, val onWall: Boolean)
+
+/**
+ * The upright pose of [image]: its heading from the wall behind it when ARCore has found that
+ * wall (see [wallYaw]), otherwise from the image itself.
+ */
+fun signPose(session: Session, image: AugmentedImage): SignPose {
+    val center = image.centerPose
+    val c = center.translation
+    val wall = session.getAllTrackables(Plane::class.java)
+        .filter { it.trackingState == TrackingState.TRACKING && it.subsumedBy == null && it.type == Plane.Type.VERTICAL }
+        .mapNotNull { plane ->
+            val n = plane.centerPose.yAxis
+            val p = plane.centerPose.translation
+            val gap = (c[0] - p[0]) * n[0] + (c[1] - p[1]) * n[1] + (c[2] - p[2]) * n[2]
+            val onPlane = Pose.makeTranslation(c[0] - gap * n[0], c[1] - gap * n[1], c[2] - gap * n[2])
+            plane.takeIf { abs(gap) < WALL_GAP && it.isPoseInPolygon(onPlane) }?.let { it to abs(gap) }
+        }
+        .minByOrNull { it.second }?.first
+    val yaw = wall?.let { wallYaw(center.xAxis, center.yAxis, it.centerPose.yAxis) }
+        ?: return SignPose(levelled(center), false)
+    return SignPose(Pose(c, floatArrayOf(0f, sin(yaw / 2), 0f, cos(yaw / 2))), true)
+}
+
+/** How far in front of or behind a wall a sign on it can be, in meters. */
+private const val WALL_GAP = 0.1f
 
 /**
  * Finds the floor under the phone. It uses the lowest detected floor plane right below the

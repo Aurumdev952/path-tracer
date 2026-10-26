@@ -78,6 +78,8 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         val steps = mutableListOf<Step>()
         var meters = 0f
         var nudged = false
+        /** Where the magnetic field was last logged. */
+        var fieldAt: TrailPoint? = null
         /** Where the anchor was made, to log how far ARCore's corrections move it as the walk goes on. */
         val madeAt: YawPose = anchor.pose.toYawPose()
         var loggedAt = 0L
@@ -110,6 +112,8 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     private var lockFrames = 0
     /** The photo's pose over the last frames it was tracked in a row, to start the leg from a steady one. */
     private val lockPoses = ArrayDeque<YawPose>()
+    /** Whether each of [lockPoses] took its heading from the wall behind the sign. */
+    private val lockOnWall = ArrayDeque<Boolean>()
     private var firstSeenAt = 0L
     private var lockStartedAt = 0L
     private var hint: String? = null
@@ -270,6 +274,11 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
                 if (last != null) leg.meters += head.distanceTo(last)
                 leg.points += head
                 leg.times += SystemClock.elapsedRealtime()
+            }
+            debug?.let { d ->
+                if (leg.fieldAt?.let { head.distanceTo(it) < FIELD_METERS } == true) return@let
+                leg.fieldAt = head
+                takeField()?.let { d.event("field", "leg" to legs.size, "m" to leg.meters, "x" to head.x, "z" to head.z, "ut" to it) }
             }
             if (!leg.nudged && leg.meters >= CHECKPOINT_NUDGE_METERS && stage == RecordStage.Walking) {
                 leg.nudged = true
@@ -453,6 +462,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         pendingPhoto = photo
         lockFrames = 0
         lockPoses.clear()
+        lockOnWall.clear()
         lockStartedAt = SystemClock.elapsedRealtime()
         seen = ImageSeen.None
         hint = null
@@ -481,6 +491,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
         }
         if (image == null) {
             lockPoses.clear()
+        lockOnWall.clear()
             if (!s.slow && SystemClock.elapsedRealtime() - lockStartedAt > SLOW_LOCK_MS) {
                 stage = s.copy(slow = true)
                 debug?.event("lock_slow", "seen_frames" to lockFrames)
@@ -493,8 +504,13 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             firstSeenAt = now
         }
         lockFrames++
-        lockPoses.addLast(levelled(image.centerPose).toYawPose())
-        while (lockPoses.size > LOCK_FRAMES) lockPoses.removeFirst()
+        val sign = signPose(session, image)
+        lockPoses.addLast(sign.pose.toYawPose())
+        lockOnWall.addLast(sign.onWall)
+        while (lockPoses.size > LOCK_FRAMES) {
+            lockPoses.removeFirst()
+            lockOnWall.removeFirst()
+        }
         if (lockPoses.size < LOCK_FRAMES) return null
         // The whole route's heading comes from this pose, so wait for ARCore to settle on one,
         // but not for ever: after a while a slightly shaky average is better than no route.
@@ -516,9 +532,11 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             legs += previous.toLeg()
             previous.anchor.detach()
         }
+        val onWall = lockOnWall.all { it }
         current = LegDraft(pendingPhoto!!, image.extentX.takeIf { it > 0f && it.isFinite() } ?: 0f, entry, anchor)
         lockedImage = image
         lockedAt = SystemClock.elapsedRealtime()
+        takeField()
         keeper.reset()
         elevatorRise = 0f
         manualFloor = null
@@ -529,6 +547,8 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
             "after_ms" to SystemClock.elapsedRealtime() - lockStartedAt,
             "frames" to lockFrames,
             "steady" to (steady != null),
+            "wall" to onWall,
+            "wall_turn_deg" to if (onWall) Math.toDegrees(turnBetween(levelled(image.centerPose).toYawPose().yaw, pose.toYawPose().yaw).toDouble()) else null,
             "width_m" to image.extentX,
             "entry" to entry.javaClass.simpleName.lowercase(),
             "offset" to (entry as? LegEntry.Checkpoint)?.fromPrevious?.let { "%.2f,%.2f,%.2f,%.1fdeg".format(java.util.Locale.US, it.x, it.y, it.z, Math.toDegrees(it.yaw.toDouble())) },
@@ -579,6 +599,7 @@ class RouteRecorder(private val store: RouteStore) : ArRenderer() {
     }
 
     private companion object {
+        const val FIELD_METERS = 0.5f
         const val STEP_METERS = 0.12f
         const val LOCK_FRAMES = 6
         const val STEADY_SHIFT = 0.02f
