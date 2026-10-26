@@ -71,7 +71,13 @@ class RouteFollower(route: Route) : ArRenderer() {
 
     private var stage: FollowStage = FollowStage.Searching(0)
     private var anchor: Anchor? = null
-    private var lastSnap: Pose? = null
+    /** Turns the photo's frame into where the stretch really lies, learned from the walk. */
+    private var aligner: RouteAligner? = null
+    /** While still near the photo just found: what ARCore saw of it, averaged into the anchor. */
+    private val settle = ArrayDeque<YawPose>()
+    private var settleLeg = -1
+    private var foundFrom: Pose? = null
+    private var progress = 0f
     private var lastSnapFrame = 0L
     private var frameCount = 0L
     private var buzz = 0
@@ -142,7 +148,7 @@ class RouteFollower(route: Route) : ArRenderer() {
                 if (anchor.trackingState == TrackingState.TRACKING) {
                     val g = guide(session, camera, anchor)
                     guidance = g
-                    arrow = arrowTo(camera, anchor, g)
+                    arrow = arrowTo(camera, stretchPose(anchor), g)
                 } else {
                     hint = hint ?: "Hold on, finding the path again"
                 }
@@ -184,7 +190,11 @@ class RouteFollower(route: Route) : ArRenderer() {
         outlineRenderer.draw(image, SignOutlineRenderer.Green, fade, view, projection)
     }
 
-    /** Re-anchors the route whenever one of its photos is in clear view. */
+    /**
+     * Places the route from its photos. A newly found photo places it; while the follower is still
+     * near it, more views are averaged in. ARCore knows where a photo is much better than which way
+     * it faces, so after that a photo only pins where it is, and the walk sets the direction.
+     */
     private fun snapToPhotos(session: Session, frame: Frame) {
         val minStretch = when (val s = stage) {
             is FollowStage.Searching -> s.stretch
@@ -199,57 +209,92 @@ class RouteFollower(route: Route) : ArRenderer() {
             if (stretchIndex < minStretch) continue
             val inStretch = navigator.stretches[stretchIndex].images.first { it.leg == leg }.pose
             val world = levelled(image.centerPose).compose(inStretch.inverse().toPose())
+            val cam = frame.camera.pose
 
-            val moving = stretchIndex != navigator.stretch || stage != FollowStage.Guiding
-            if (!moving && !movedEnough(world)) continue
-            debug?.let { d ->
-                if (stage != FollowStage.Guiding) {
-                    d.event("found", "leg" to leg, "stretch" to stretchIndex, "after_ms" to SystemClock.elapsedRealtime() - searchStartedAt)
-                } else {
-                    // How far the route moves when a photo puts it back in place: the drift so far.
-                    val was = anchor?.pose
-                    val drift = was?.let { hypot(hypot(world.tx() - it.tx(), world.ty() - it.ty()), world.tz() - it.tz()) }
-                    val turn = was?.let { Math.toDegrees((world.toYawPose().yaw - it.toYawPose().yaw).toDouble()) }
-                    d.event("snap", "leg" to leg, "stretch" to stretchIndex, "drift_m" to drift, "turn_deg" to turn)
-                    d.show("last_drift", drift)
-                }
-            }
-            navigator.lockOn(leg)
-            if (moving) {
+            if (stretchIndex != navigator.stretch || stage != FollowStage.Guiding) {
+                debug?.event("found", "leg" to leg, "stretch" to stretchIndex, "after_ms" to SystemClock.elapsedRealtime() - searchStartedAt)
+                navigator.lockOn(leg)
                 riddenRise = 0f
                 rideCheck = null
                 foundImage = image
                 foundAt = SystemClock.elapsedRealtime()
+                spokenFor = null
+                stage = FollowStage.Guiding
+                settle.clear()
+                settle += world.toYawPose()
+                settleLeg = leg
+                foundFrom = cam
+                place(session, world, stretchIndex, leg)
+                return
             }
-            if (moving) spokenFor = null
-            stage = FollowStage.Guiding
-            dropAnchor()
-            anchor = session.createAnchor(world)
-            lastSnap = world
-            lastSnapFrame = frameCount
+            if (frameCount - lastSnapFrame < SNAP_EVERY_FRAMES) continue
+            val from = foundFrom
+            val near = from != null && hypot(cam.tx() - from.tx(), cam.tz() - from.tz()) < SETTLE_METERS
+            if (leg == settleLeg && near) {
+                settle += world.toYawPose()
+                if (settle.size > SETTLE_VIEWS) settle.removeFirst()
+                val mean = steadyPose(settle, Float.MAX_VALUE, Float.MAX_VALUE)!!.toPose()
+                debug?.let { d ->
+                    val was = anchor?.pose
+                    val drift = was?.let { hypot(hypot(mean.tx() - it.tx(), mean.ty() - it.ty()), mean.tz() - it.tz()) }
+                    val turn = was?.let { Math.toDegrees((mean.toYawPose().yaw - it.toYawPose().yaw).toDouble()) }
+                    d.event("snap", "leg" to leg, "views" to settle.size, "drift_m" to drift, "turn_deg" to turn)
+                }
+                place(session, mean, stretchIndex, leg)
+            } else {
+                val anchor = anchor ?: continue
+                val aligner = aligner ?: continue
+                val c = anchor.pose.inverse().transformPoint(image.centerPose.translation)
+                val seen = TrailPoint(c[0], c[1], c[2])
+                val expected = TrailPoint(inStretch.x, inStretch.y, inStretch.z)
+                val before = aligner.fit.apply(seen)
+                aligner.landmark(leg, seen, expected)
+                debug?.event("landmark", "leg" to leg, "error_m" to hypot(before.x - expected.x, before.z - expected.z))
+                lastSnapFrame = frameCount
+            }
             return
         }
     }
 
-    private fun movedEnough(world: Pose): Boolean {
-        val last = lastSnap ?: return true
-        if (frameCount - lastSnapFrame < SNAP_EVERY_FRAMES) return false
-        val d = hypot(hypot(world.tx() - last.tx(), world.ty() - last.ty()), world.tz() - last.tz())
-        val turn = abs(world.toYawPose().yaw - last.toYawPose().yaw)
-        return d > SNAP_METERS || turn > SNAP_RADIANS
+    /** Puts the stretch at [world], with photo [leg] pinning its own spot in it. */
+    private fun place(session: Session, world: Pose, stretchIndex: Int, leg: Int) {
+        dropAnchor()
+        anchor = session.createAnchor(world)
+        val stretch = navigator.stretches[stretchIndex]
+        val image = stretch.images.indexOfFirst { it.leg == leg }
+        val at = stretch.images[image].pose
+        val photo = TrailPoint(at.x, at.y, at.z)
+        aligner = RouteAligner(stretch.path).also { it.landmark(leg, photo, photo) }
+        progress = stretch.path.distanceAt(stretch.legStarts[image])
+        lastSnapFrame = frameCount
     }
+
+    /** Where the stretch's frame is in the world: the photo's, corrected by the walk. */
+    private fun stretchPose(anchor: Anchor): Pose =
+        anchor.pose.compose((aligner?.fit ?: YawPose.Identity).inverse().toPose())
 
     private fun dropAnchor() {
         anchor?.detach()
         anchor = null
+        aligner = null
         keeper.reset()
-        lastSnap = null
     }
 
     private fun guide(session: Session, camera: Camera, anchor: Anchor): Guidance {
         val cam = camera.pose
         val local = anchor.pose.inverse().transformPoint(floatArrayOf(cam.tx(), floorTracker.floorY(session, camera), cam.tz()))
-        val g = navigator.update(TrailPoint(local[0], local[1], local[2]))
+        val here = TrailPoint(local[0], local[1], local[2])
+        val aligner = aligner
+        if (aligner?.walk(here, progress) == true) {
+            val f = aligner.fit
+            debug?.event(
+                "align", "walked_m" to aligner.walked, "x" to here.x, "z" to here.z, "s" to progress,
+                "turn_deg" to Math.toDegrees(f.yaw.toDouble()), "shift_x" to f.x, "shift_z" to f.z,
+            )
+        }
+        val fit = aligner?.fit ?: YawPose.Identity
+        val g = navigator.update(fit.apply(here))
+        progress = g.progress
 
         // Buzz and speak once when each turn, floor change or end comes within reach. Also speak
         // when a new instruction comes up, e.g. "Go straight" after a turn.
@@ -280,7 +325,7 @@ class RouteFollower(route: Route) : ArRenderer() {
         }
         camera.getViewMatrix(view, 0)
         camera.getProjectionMatrix(projection, 0, 0.05f, 100f)
-        anchor.pose.toMatrix(model, 0)
+        stretchPose(anchor).toMatrix(model, 0)
         val seconds = (SystemClock.elapsedRealtime() - startTime) / 1000f
         guideRenderer.draw(
             path.slice(from, to), if (endsHere) to + 10f else to, turn, marker,
@@ -357,8 +402,8 @@ class RouteFollower(route: Route) : ArRenderer() {
     }
 
     /** The turn needed to face the path, or null when the path is roughly ahead. */
-    private fun arrowTo(camera: Camera, anchor: Anchor, g: Guidance): Float? {
-        val target = anchor.pose.transformPoint(floatArrayOf(g.target.x, g.target.y, g.target.z))
+    private fun arrowTo(camera: Camera, stretch: Pose, g: Guidance): Float? {
+        val target = stretch.transformPoint(floatArrayOf(g.target.x, g.target.y, g.target.z))
         val cam = camera.pose
         val z = cam.zAxis
         var fx = -z[0]
@@ -434,8 +479,9 @@ class RouteFollower(route: Route) : ArRenderer() {
         const val SAMPLE_MS = 1000L
         const val OUTLINE_MS = 1500L
         const val SNAP_EVERY_FRAMES = 15
-        const val SNAP_METERS = 0.04f
-        const val SNAP_RADIANS = 0.03f
+        /** Views of the photo are averaged while the follower is this close to where they found it. */
+        const val SETTLE_METERS = 1.5f
+        const val SETTLE_VIEWS = 30
         val ARROW_ANGLE = Math.toRadians(35.0).toFloat()
     }
 }

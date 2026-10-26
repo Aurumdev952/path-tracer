@@ -58,7 +58,8 @@ class Path(val points: List<TrailPoint>) {
         return if (global.offset < local.offset - 0.5f) global else local
     }
 
-    private fun nearest(p: TrailPoint, from: Float, to: Float): Fix {
+    /** The closest point to [p] on the part of the path between [from] and [to]. */
+    fun nearest(p: TrailPoint, from: Float, to: Float): Fix {
         var best = Fix(0f, Float.MAX_VALUE, points.first())
         for (i in 0 until points.lastIndex) {
             if (cum[i + 1] < from || cum[i] > to) continue
