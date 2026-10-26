@@ -115,6 +115,8 @@ class FollowActivity : ArActivity() {
     }
 
     override fun configure(session: Session, config: Config) {
+        // Walls let a sign on one be lined up with it, which gives a far steadier heading.
+        config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
         debug?.event("depth_supported", "value" to session.isDepthModeSupported(Config.DepthMode.AUTOMATIC))
         if (session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
             config.depthMode = Config.DepthMode.AUTOMATIC
