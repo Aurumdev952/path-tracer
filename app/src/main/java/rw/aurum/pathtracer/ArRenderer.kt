@@ -60,6 +60,23 @@ abstract class ArRenderer : GLSurfaceView.Renderer {
         while (true) each(steps.poll() ?: return)
     }
 
+    private val field = FloatArray(3)
+
+    /** Adds a magnetic field reading (strength, vertical part) to the running average. */
+    fun pushField(total: Float, vertical: Float) = synchronized(field) {
+        field[0] += total
+        field[1] += vertical
+        field[2]++
+    }
+
+    /** The average field since the last call, as "strength,vertical", or null if none came. */
+    protected fun takeField(): String? = synchronized(field) {
+        if (field[2] == 0f) return null
+        val out = "%.2f,%.2f".format(java.util.Locale.US, field[0] / field[2], field[1] / field[2])
+        field.fill(0f)
+        out
+    }
+
     /** Set when debug mode is on. */
     @Volatile var debug: DebugLog? = null
     private var fpsFrames = 0

@@ -57,6 +57,9 @@ fun spanOnPlane(oa: FloatArray, da: FloatArray, ob: FloatArray, db: FloatArray, 
 /** cos(75 degrees): rays closer to the plane than this give unreliable widths. */
 private const val GRAZING = 0.26f
 
+/** The turn from heading [from] to heading [to], in radians between -pi and pi. */
+fun turnBetween(from: Float, to: Float): Float = kotlin.math.atan2(sin(to - from), cos(to - from))
+
 /**
  * The average of [poses] when they agree: every position within [maxShift] meters of the average
  * and every heading within [maxTurn] radians of it. Null when they don't, or there are none.
